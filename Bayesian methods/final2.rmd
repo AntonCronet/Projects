@@ -1,0 +1,208 @@
+---
+title: "Bayesian methods exploration"
+author: "Anton Cronet"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+The data was provided by Uppsala University as an example dataset to practice Bayesian Statistics.
+
+Based on data showing which genes are present in 100 randomly selected individuals, and the theoretical frequencies these should appear, the goal is to estimate the "inbreeding factor". This factor is part of the theoretical equations determining the frequencies of the possible genotypes.
+
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+
+The individual log likelihoods of the AA, Aa, and aa genotypes are given by:
+$$  
+    nAA * log(f * p + (1 - f) * p^2)
+$$
+$$
+    nAa * log((1 - f) * 2 * p * (1 - p))
+$$
+$$
+    naa * log(f * (1 - p) + (1 - f) * (1 - p)^2)
+$$
+Hence the log likelihood of p and f given the observed data is:
+$$
+loglik <- nAA * log(f * p + (1 - f) * p^2) + nAa * log((1 - f) * 2 * p * (1 - p)) + naa * log(f * (1 - p) + (1 - f) * (1 - p)^2)
+$$
+
+```{r 1.1}
+genes <- read.csv("gener.csv")
+
+nAA <- sum(genes == "AA")
+nAa <- sum(genes == "Aa")
+naa <- sum(genes == "aa")
+
+loglikelihood <- function(params, data) {
+  p <- params[1]
+  f <- params[2]
+  
+  if (p >= 0 & p <= 1 & f >= 0 & f <= 1) {
+    lik_AA <- nAA * log(f * p + (1 - f) * p^2)
+    lik_Aa <- nAa * log((1 - f) * 2 * p * (1 - p))
+    lik_aa <- naa * log(f * (1 - p) + (1 - f) * (1 - p)^2)
+    
+    return(lik_AA + lik_Aa + lik_aa)
+  } else {
+    return(-Inf)
+  }
+}
+```
+
+The prior distributions for p and f both are beta distributions since these are limited between 0 and 1
+```{r 1.2}
+logprior <- function(params) {
+  p <- params[1]
+  f <- params[2]
+  
+  prior <- dbeta(p, 2, 2, log = TRUE) + dbeta(f, 2, 2, log = TRUE)
+  
+  return(prior)
+}
+```
+
+The density of the posterior distribution is computed by multiplying the prior with the likelihood, since we are working with logs, these are added together:
+```{r 1.3}
+logposterior <- function(params, data) {
+  loglik <- loglikelihood(params, data)
+  prior <- logprior(params)
+  
+  return(loglik + prior)
+}
+```
+
+First MCMC is run for 1000 iterations with the initial parameters 0.5 and 0.5, and then use the results as better initial guesses to run 10000 iterations. The initial burn-in period leads to the new initial values being 0.496 and 0.199. The second run of the MCMC algorithm saves all the results of p and f 's distributions respectively.
+
+```{r 1.4}
+
+source("mcmciter.R")
+# Set initial values for parameters
+initial_params <- c(0.5, 0.5)
+sigma <- 0.1
+n.iter <- 1000
+
+result_first_run <- mcmc.iter(initial_params, logposterior, sigma, n.iter)
+
+new_params <- tail(result_first_run$sample, 1)
+n.iter <- 10000
+
+result <- mcmc.iter(new_params, logposterior, sigma, n.iter)
+```
+
+\newpage
+
+Parameter f, representing the inbreeding factor has the following histogram:
+
+&nbsp; 
+
+```{r 1.5}
+ hist(result$sample[, 2], breaks = 30, col = "coral", main = paste("Posterior Distribution of f"), xlab="Parameter f")
+```
+```{r 1.6}
+# Extract the posterior samples for parameter f
+posterior_f <- result$sample[, 2]
+
+
+# Compute the 95% credible interval
+credible_interval <- quantile(posterior_f, c(0.025, 0.5, 0.975))
+
+cat("Point estimate for f:", credible_interval[2], "(50% quantile)")
+
+cat("95%  Interval for f: [", credible_interval[1], ",", credible_interval[3], "]\n")
+```
+
+\newpage
+# Task 2
+In the second part of this assignment we will take a look at a data set consisting of different body characteristics, the data consists of 100 observations and ten variables. 
+
+To start we will use non-parametric bootstrap to compute a 95% confidence interval for the correlation between the
+Bodyfat and Weight variables.
+
+```{r,include=FALSE}
+library(boot)
+library(Lock5Data)
+
+data("BodyFat")
+
+```
+
+```{r,}
+# Function for correlation
+corr.func <- function(data, index) {
+  sample_data <- data[index, ]                   
+  cor(sample_data$Bodyfat, sample_data$Weight)
+}
+
+boot.result <- boot(data = BodyFat,
+                     statistic = corr.func,
+                     R = 1000)
+
+ci_bas <- boot.ci(boot.result, type = "basic") # Standard interval
+ci_bca <- boot.ci(boot.result, type = "bca")   # Bias corrected
+
+```
+```{r, echo=FALSE}
+Lower_bas <- ci_bas$basic[4]
+Upper_bas <- ci_bas$basic[5]
+
+Lower_bca <- ci_bca$bca[4]
+Upper_bca <- ci_bca$bca[5]
+
+c(Lower = Lower_bas |> unname(), Upper = Upper_bas |> unname()) # Standard interval
+c(Lower = Lower_bca |> unname(), Upper = Upper_bca |> unname()) # Bias corrected
+```
+The firs interval being the standard interval and the second being bias corrected. 
+
+Next we will estimate a linear regression with BodyFat as the dependent variable and all the other nine variables as reggressors. 
+
+``` {r, echo=FALSE}
+linmod <- lm(Bodyfat ~ ., data = BodyFat)
+print(linmod)
+```
+
+Taking a closer look at the coefficient for Weight, we compute a 95% bootstrap confidence interval for the regression coefficient of Weight. 
+
+``` {r,}
+coef.func <- function(data, index) {
+  data.sample <- data[index, ]
+  model <- lm(Bodyfat ~ ., data = data.sample)
+
+  coef.weight <- coef(model)["Weight"]
+}
+
+
+coef.boot.result <- boot(data = BodyFat,
+                    statistic = coef.func,
+                    R = 1000)
+
+ci_bas <- boot.ci(coef.boot.result, type = "basic") # Standard interval
+ci_bca <- boot.ci(coef.boot.result, type = "bca")   # Bias corrected
+
+```
+```{r, echo=FALSE}
+Lower_bas <- ci_bas$basic[4]
+Upper_bas <- ci_bas$basic[5]
+
+Lower_bca <- ci_bca$bca[4]
+Upper_bca <- ci_bca$bca[5]
+
+c(Lower = Lower_bas |> unname(), Upper = Upper_bas |> unname()) # Standard interval
+c(Lower = Lower_bca |> unname(), Upper = Upper_bca |> unname()) # Bias corrected
+```
+The firs interval being the standard interval and the second being bias corrected. 
+
+Lastly we will compare the bootstrap confidence interval for the weight coefficient to that we would get when making the usual assumption of normality. The confidence interval for the coefficient of weight when assuming normality we get by running the code below.
+
+``` {r, echo=FALSE}
+confint(linmod)["Weight", ]
+```
+It is clear to see that using bootstrap, we are able to to get a narrower confidence interval.  
+
+
+
+
