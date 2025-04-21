@@ -7,6 +7,13 @@ output:
     number_sections: true
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
 
 In the second part of this assignment we will take a look at a data set consisting of different body characteristics, the data consists of 100 observations and ten variables. 
 

@@ -6,6 +6,15 @@ output:
     toc_depth: 2
     number_sections: true
 ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
 The data was provided by Uppsala University as an example dataset to practice Bayesian Statistics.
 
 Based on data showing which genes are present in 100 randomly selected individuals, and the theoretical frequencies these should appear, the goal is to estimate the "inbreeding factor". This factor is part of the theoretical equations determining the frequencies of the possible genotypes.
