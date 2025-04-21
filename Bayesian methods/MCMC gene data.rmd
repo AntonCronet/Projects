@@ -1,10 +1,6 @@
 ---
 title: "R Notebook"
-output:
-  html_notebook:
-    toc: true
-    toc_depth: 2
-    number_sections: true
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
