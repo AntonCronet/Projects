@@ -1,23 +1,15 @@
 ---
 title: "R Notebook"
-output:
-  html_notebook:
-    toc: true
-    toc_depth: 2
-    number_sections: true
+output: html_notebook
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  echo = TRUE,
-  message = FALSE,
-  warning = FALSE
-)
+knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
-In the second part of this assignment we will take a look at a data set consisting of different body characteristics, the data consists of 100 observations and ten variables. 
 
-To start we will use non-parametric bootstrap to compute a 95% confidence interval for the correlation between the
+Non-parametric bootstrap is used to compute a 95% confidence interval for the correlation between the
 Bodyfat and Weight variables.
 
 ```{r,include=FALSE}

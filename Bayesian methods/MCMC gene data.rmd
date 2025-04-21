@@ -1,18 +1,11 @@
 ---
 title: "R Notebook"
-output:
-  html_notebook:
-    toc: true
-    toc_depth: 2
-    number_sections: true
+output: html_notebook
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  echo = TRUE,
-  message = FALSE,
-  warning = FALSE
-)
+knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
 The data was provided by Uppsala University as an example dataset to practice Bayesian Statistics.
@@ -119,92 +112,6 @@ cat("Point estimate for f:", credible_interval[2], "(50% quantile)")
 
 cat("95%  Interval for f: [", credible_interval[1], ",", credible_interval[3], "]\n")
 ```
-
-
-In the second part of this assignment we will take a look at a data set consisting of different body characteristics, the data consists of 100 observations and ten variables. 
-
-To start we will use non-parametric bootstrap to compute a 95% confidence interval for the correlation between the
-Bodyfat and Weight variables.
-
-```{r,include=FALSE}
-library(boot)
-library(Lock5Data)
-
-data("BodyFat")
-
-```
-
-```{r,}
-# Function for correlation
-corr.func <- function(data, index) {
-  sample_data <- data[index, ]                   
-  cor(sample_data$Bodyfat, sample_data$Weight)
-}
-
-boot.result <- boot(data = BodyFat,
-                     statistic = corr.func,
-                     R = 1000)
-
-ci_bas <- boot.ci(boot.result, type = "basic") # Standard interval
-ci_bca <- boot.ci(boot.result, type = "bca")   # Bias corrected
-
-```
-```{r, echo=FALSE}
-Lower_bas <- ci_bas$basic[4]
-Upper_bas <- ci_bas$basic[5]
-
-Lower_bca <- ci_bca$bca[4]
-Upper_bca <- ci_bca$bca[5]
-
-c(Lower = Lower_bas |> unname(), Upper = Upper_bas |> unname()) # Standard interval
-c(Lower = Lower_bca |> unname(), Upper = Upper_bca |> unname()) # Bias corrected
-```
-The firs interval being the standard interval and the second being bias corrected. 
-
-Next we will estimate a linear regression with BodyFat as the dependent variable and all the other nine variables as reggressors. 
-
-``` {r, echo=FALSE}
-linmod <- lm(Bodyfat ~ ., data = BodyFat)
-print(linmod)
-```
-
-Taking a closer look at the coefficient for Weight, we compute a 95% bootstrap confidence interval for the regression coefficient of Weight. 
-
-``` {r,}
-coef.func <- function(data, index) {
-  data.sample <- data[index, ]
-  model <- lm(Bodyfat ~ ., data = data.sample)
-
-  coef.weight <- coef(model)["Weight"]
-}
-
-
-coef.boot.result <- boot(data = BodyFat,
-                    statistic = coef.func,
-                    R = 1000)
-
-ci_bas <- boot.ci(coef.boot.result, type = "basic") # Standard interval
-ci_bca <- boot.ci(coef.boot.result, type = "bca")   # Bias corrected
-
-```
-```{r, echo=FALSE}
-Lower_bas <- ci_bas$basic[4]
-Upper_bas <- ci_bas$basic[5]
-
-Lower_bca <- ci_bca$bca[4]
-Upper_bca <- ci_bca$bca[5]
-
-c(Lower = Lower_bas |> unname(), Upper = Upper_bas |> unname()) # Standard interval
-c(Lower = Lower_bca |> unname(), Upper = Upper_bca |> unname()) # Bias corrected
-```
-The firs interval being the standard interval and the second being bias corrected. 
-
-Lastly we will compare the bootstrap confidence interval for the weight coefficient to that we would get when making the usual assumption of normality. The confidence interval for the coefficient of weight when assuming normality we get by running the code below.
-
-``` {r, echo=FALSE}
-confint(linmod)["Weight", ]
-```
-It is clear to see that using bootstrap, we are able to to get a narrower confidence interval.  
 
 
 
