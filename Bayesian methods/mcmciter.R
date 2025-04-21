@@ -21,7 +21,7 @@ mcmc.iter <- function(theta, logDensity, sigma, n.iter){
       
     }
     
-    res[i+1,] <- theta # Save value } 
+    res[i+1,] <- theta # Save value  
     
   }
   
