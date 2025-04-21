@@ -1,19 +1,10 @@
 ---
-title: "Bayesian methods exploration"
-author: "Anton Cronet"
-date: "`r Sys.Date()`"
-output: pdf_document
+title: "R Notebook"
+output: html_notebook
 ---
 The data was provided by Uppsala University as an example dataset to practice Bayesian Statistics.
 
 Based on data showing which genes are present in 100 randomly selected individuals, and the theoretical frequencies these should appear, the goal is to estimate the "inbreeding factor". This factor is part of the theoretical equations determining the frequencies of the possible genotypes.
-
- 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-
-```
-
 
 
 The individual log likelihoods of the AA, Aa, and aa genotypes are given by:
@@ -116,8 +107,7 @@ cat("Point estimate for f:", credible_interval[2], "(50% quantile)")
 cat("95%  Interval for f: [", credible_interval[1], ",", credible_interval[3], "]\n")
 ```
 
-\newpage
-# Task 2
+
 In the second part of this assignment we will take a look at a data set consisting of different body characteristics, the data consists of 100 observations and ten variables. 
 
 To start we will use non-parametric bootstrap to compute a 95% confidence interval for the correlation between the
