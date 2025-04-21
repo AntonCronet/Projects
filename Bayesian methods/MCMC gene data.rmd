@@ -1,12 +1,13 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "MCMC application"
+author: "Anton Cronet"
+output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
 ```
+
 
 The data was provided by Uppsala University as an example dataset to practice Bayesian Statistics.
 
