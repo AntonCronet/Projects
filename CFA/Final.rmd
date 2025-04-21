@@ -1,0 +1,565 @@
+---
+title: "CFA"
+author: "Anton Cronet, Gustaf Strid"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+---
+
+\fontsize{12pt}{14pt}\selectfont
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MVN)
+library(psych)
+library(lavaan)
+library(semPlot)
+library(bestNormalize)
+library(GPArotation)
+library(readxl)
+
+data <- read.csv("StructuralEquationModelingData.csv")
+```
+
+
+To determine what factors relate to job performance, a data set containing nine job performance-related variables regarding 1000 employees was chosen. The aim is to confirm the latent structures suggested by theory of which influence job performance. To test these latent constructs a confirmatory factor analysis was conducted. Where we found that the first measurement model that was proposed was not sufficient to explain the variation in the data.  
+
+\newpage
+
+# Introduction
+In the context of worklife, it is important to understand the factors that contribute to job performance. Analyzing these factors, such as with Confirmatory Factor Analysis (CFA), can help draw conclusions to a vague concept. Job performance can be measured by many metrics, such as revenue, or hours worked, but these only measure the extent of these variables. 
+What actually is important when looking at job performance? 
+What factors play which roles in the whole concept of job performance?
+
+The purpose of this report is to employ Confirmatory Factor Analysis to test theoretical predictions regarding the factors that contribute to job performance. This involves assessing whether the proposed measurement model adequately captures the latent structure of job performance as hypothesized based on prior research and theories. Specifically, we aim to verify if the observed variables scores on psychological tests, client and superior satisfaction, education levels, IQ scores, work hours, hours spent on personal culture outside of work, and project completion percentages can by creating a three factor model consisting of the three latent structures motivation, intellect and social ability sufficiently explaine the variation in the data. 
+
+
+
+
+
+
+\newpage
+
+#  Data description
+The data set sets a score from 0-100 for most variables. The only exceptions are IQ, and time variables such as hours worked in a week, or hours spent towards personal culture. The data measures different aspects of either the employees themselves or the effect they are having in their workplace. The data consists of 1000 observations. 
+
+There is a lack of information around the data set, however it could be assumed that these observations are sampled in a similar way, seeing as these are transformed into scores relative to each other. With 1000 observations, there is plenty of data to fit a Factor Analysis model. The data was not transformed any further.
+
+**Overview of the 9 variables with some observations**
+```{r data, echo=FALSE}
+str(data)
+```
+
+The PsychTest variables refer to 2 psychological tests, and the score the employees had on these. 
+\newline&nbsp; 
+
+YrsEdu is the amount of higher education that the employees have, with the data ranging from 0 to 5. 
+\newline&nbsp;
+
+IQ is IQ test score.
+\newline&nbsp;
+
+HrsTrn is the amount of hours a week dedicated to "personal culture" outside of work hours, this could for example be reading relevant articles and self-studying, all related to the employees work. 
+\newline&nbsp;
+
+HrsWrk refers to the amount of hours an employee works in a week. 
+\newline&nbsp;
+
+ClientSat and SuperSat refer to the satisfaction of the employees work from the clients and superiors respectively. 
+\newline&nbsp;
+
+Lastly, ProjCompl measures the percentage completion of the respective employees' projects. 
+\newline&nbsp;
+The dataset comes from Kaggle, and is compiled to represent different aspects of job performance
+
+# Data suitability and assumptions
+
+Next we need to investigate if the data is suitable for a factor analysis and if the assumptions are fulfilled. First inspection of the data regarding the suitability is to check the correlation in the data. If the data does not contain sufficient correlations the data is not suitable for factor analysis, since it relies on the interrelationships among variables to identify underlying latent structures. A start is to look at the correlation matrix.
+
+**Correlation matrix between all the variables**
+```{r corrmat, echo=FALSE}
+cor_matrix <- cor(data)
+
+# Round the correlation coefficients to three decimals
+cor_matrix_rounded <- round(cor_matrix, 3)
+
+# Print the rounded correlation matrix
+print(cor_matrix_rounded)
+```
+When examining the correlation matrix, it is clear that the data have sufficient levels of correlation, with many coefficients exceeding 0.3. Additionally, there seems to be no issue regarding perfect multicollinearity. Furthermore, Bartlett's Test of Sphericity is another way of testing the correlation in the data. Bartlett's Test of Sphericity tests the null that all variables are uncorrelated. Rejecting the null does not necessarily mean that the correlations are good, but it is an indication that the data might be suitable. The result from Bartlett's Test (see appendix) is yet another good indication. 
+
+Regarding the assumptions for both exploratory and confirmatory factor analysis it is challenging to test all assumptions in advance, like the assumption of no correlated error terms. The assumption of no correlated error terms for the exploratory factor analysis(EFA) will however to a large degree be indirectly evaluated through the model fit evaluation of the implied model in the confirmatory analysis. Other assumptions are possible to check beforehand like the assumption that the variables must be on an interval or ratio scale. Although it is not technically met due to the inclusion of the variables ClientSat and SuperSat since these are on likert scale. However, likert scale variables are often used in factor analysis since they tend to approximate interval measurement well enough. The inclusion of years of education and IQ are also a bit questionable regarding directionality. It is unlikely that these variables are outcomes of job performance. Despite that, it is reasonable to assume that these variables contribute to some latent structure like intellect which could be a factor of job performance. 
+
+**Distribution of the data for each variable with a fitted normal distribution**
+```{r MVN, echo=FALSE}
+invisible(mvn(data, univariatePlot = "histogram"))
+```
+Based on looking at the histograms, with the exception of YrsEdu and maybe IQ, the variables show distributions that are fairly symmetrical and bell-shaped, which is a good indication of univariate normal distribution for the variables. While a few of the variables are not perfectly symmetrical they do not seem to exhibit too large skewness or kurtosis to the point that it substantially violates the assumption of normality. With the exception of the variables IQ and YearEdu, it would not be unreasonable to assume they are sampled from a normal distribution. The distribution of IQ in our sample is not clearly normal distributed, but it should be sampled from a normal distribution since IQ is normal.  
+
+Univariate normal distributions do not guarantee that joint distribution of the variables is multivariate normal.
+
+# Method
+
+The main statistical method that will be used in this assignment is a confirmatory factor analysis. CFA is a statistical method in the more general framework structural equation modeling. CFA is a confirmatory method used to test hypotheses regarding the underlying factors that manifest in the observed indication variables. That is CFA is used to test the fit of a pre proposed model, often specified by theory. The model that is being tested aims to express the relationship between the observed variables and their underlying latent constructs. In factor analysis the latent structures are measured indirectly through the covariance or correlation among the observed variables to estimate the strength of the relationship between the indicator variables and their corresponding factors.
+
+The choice of using CFA as the method for this assignment is based on the fact that job performance is oftentimes multidimensional, it is for the most part near impossible to measure the performance directly (Some really specific factory jobs might have output as the only metric). Job performance is a latent construct, making it highly suitable for a factor analysis. Furthermore the topic of job performance is a well researched subject where there already are some established theories on what factors impact job performance.
+
+However, the data at hand does not exactly mimic previous theories. Therefore we will also conducting an EFA to aid the formulation of the measurement model. EFA is a method used for identifying underlying structures. Unlike CFA that tests an already existing model, EFA aims to discover patterns within the data.
+
+Once a model is found, modindices caneb used to determine what modification of the model would have hte greatest impact. These will be computed using the lavaan package in R. The model refinement process involved evaluating these modifications and only incorporating those that align with the theoretical expectations and improved model fit.
+
+```{r spliting data, include=FALSE}
+# split the data 30/70
+set.seed(000317) 
+total_rows <- nrow(data)
+shuffled_indices <- sample(total_rows)
+split_point <- round(total_rows * 0.3)
+EFAdata_indices <- shuffled_indices[1:split_point]
+CFAdata_indices <- shuffled_indices[(split_point + 1):total_rows]
+
+EFAdata <- data[EFAdata_indices, ]
+CFAdata <- data[CFAdata_indices, ]
+```
+
+
+
+# Choosing the measurement model
+The measurement model for a confirmatory factor analysis can be created based on either an EFA, theory, empirical evidence, subject-matter knowledge, experience or a combination of these. As stated earlier, there is previous research regarding the topic of job performance. Despite that, there is not a pre-proposed measurement model that is directly applicable to the data at our disposal. However previous theory and subject matter knowledge can still be of aid to help formulate our measurement model. Caillier (2010) researches factors affecting job performance, where attitude is one category of variables. NG and Feldman (2009) use education level as a prediction variable in their research. Neither of the mentioned research performs a CFA but still gives a good indication of what dimension they believe constitutes job performance. 
+
+The purpose of this report is to conduct a CFA, not an EFA. However, doing an EFA can still help aid the formulation of the measurement model. As such an EFA was conducted (see appendix for results ). Doing EFA on the same data as the CFA is sub-optimal since it will lead to bias. Hence, the data was split at random into two parts one data set for the EFA and one for the CFA. As the EFA is primarily a supplement to the theoretical in constructing the measurement model and the main focus is on the CFA, a 70/30 split was made. Noting that the results from the EFA were not without concerns, a quite clear structures emerge with three factors. The indicator variables HrsTrn, HrsWrk, SuperStat and ProjCompl load very highly on the first factor. The variables PsychTest1, PsychTest2 together with ClientSat load the highest on the second factor. And the variables IQ and YsrEdu make up the third factor. 
+
+The Suggested model fits quite well with the dimensions suggested  from previous research above. The variables IQ and YrsEdu could quite intuitively be indicators of the latent construct of intellect. The same goes for the variables HrsTrn, HrsWrk, SuperStat and ProjCompl, they could likely be indicators of motivation akin to attitude. Assuming that the variables PsychTest1 and PsychTest2 have some association to how social a person is, they together with ClientSat are possible indicators of social ability.
+
+The hypothesis behind our model, and which will be tested is if these grouping of variables belong together in modeling different aspects of job performance. All variables linked to the employee's involvement in the work were grouped into the category "motivation", these variables being the hours put into work, into informings one's self to relevant events, project completion and the satisfaction from the superiors. These all show the time and work an employee dedicates, as well as superior satisfaction being an external metric related to all of these, supposedly. Social ability should be a conceptualized as latent construct in the context of several reasons. Social ability encompasses a range of work place related skills, such as communication, empathy, teamwork, and conflict resolution. lastly intellect as a factor for job performance seems reasonable, as is facilitates for important things like problem solving, learning and application of knowledge. 
+
+The goal with testing the measurement model is to test a model that makes sense. Social ability, motivation and intellect are three dimensions of job performance that intuitively seem reasonable. Combined with that fact,the reasoning above,  the EFA and previous research our proposed measurement model will be:
+
+```{r Model Initial, include=FALSE}
+measurement.model <- '
+
+Social Ability =~  ClientSat + PsychTest1 + PsychTest2
+
+Motivation =~ HrsWrk + HrsTrn + SuperSat + ProjCompl
+
+Intellect =~ IQ + YrsEdu
+'
+```
+\newpage
+**Measurement model**
+
+```{r,echo=FALSE}
+library(semPlot)
+your_model <- suppressWarnings(sem(measurement.model, data = data))
+
+
+semPaths(your_model, whatLabels = "none", layout = "tree2", 
+         fixedStyle = FALSE, residuals = TRUE, sizeMan = 8)
+
+
+```
+
+Our mesuremnet model consist of three latent variables, social ability (ScB), Motevation (Mtv) and Intellect (Int) all allowed to be correlated. Scb has three observed variables ClientSat (CIS) PsychTest1 (PT1) PsychTest2 (PT2) connected to it, Mtv has the observed variables HrsWrk (HrW), HrsTrn (HrT) SuperSat (Sps) and ProjCompl (PrC). lastley the third latent variable Int has the observed variables IQ and YrsEdu (YrE). No cross loadings and no correlated errors. 
+
+
+Regarding identification. A necessary but unfortunately not sufficient condition is the  t- rule, that states that the number unique variance and covariance need to be greater than the number of free parameters in the model. Number of unique variance and covariance:
+\newline&nbsp;
+9(9+1)/2 = 45
+\newline&nbsp;
+Number of free parameters in the model are 24. Since the 45 > 24 the t-rule is fulfilled. 
+
+A condition that is sufficient but not necessary is the three-indicator rule. That is the model does not need to fulfill this condition to be identified, but if it does it will be. The three-indicator rule states that all factors has at least three indicator variables, their should be no correlated errors and all indicator variables loads to only one factor. In the measurement model each indicator variable only loads to one factor each, their is no cross loading and assumed their is no correlated errors terms of each indicator variable (these represent the unique variance in the indicator variables that are not explained by the latent factors). However, the intellect factor only have two indicators so the three-indicator rule is not fulfilled. Despite intellect only having two indicator variables, the model seem identified fulfilling every other condition. Only having two indicator is not enough to conclude that the model is not identifiable, but it could potentially be problematic for assessing model fit.
+  
+
+
+\newpage
+# Results 
+
+To start off we had our theoretical model. This model uses all the available variables as decribed in the previous section:
+
+**Figure showing the links between the factors and their respective latent variables:**
+```{r,echo=FALSE}
+
+your_model <- suppressWarnings(sem(measurement.model, data = data))
+
+par(mfrow = c(1, 1))
+
+result <- try({
+  semPaths(your_model, whatLabels = "none", layout = "tree2", fixedStyle = FALSE, residuals = TRUE, sizeMan = 8, height = 10, width = 10)
+}, silent = TRUE)
+
+```
+
+```{r,include=FALSE}
+CFA.output <- cfa(model = measurement.model, # Here you give the model specification.
+                  sample.cov = cor(CFAdata), # Covariance or correlation matrix
+                  sample.nobs = 700, # The number of observations
+                  estimator = "ml", # Estimation technique: Maximum Likelihood
+                  std.lv = TRUE)
+
+```
+
+**Fit measures of the model:**
+```{r, echo=FALSE}
+fit_indices <- fitMeasures(CFA.output)
+
+# Extract specific fit indices with the correct naming convention
+CFI <- fit_indices["cfi"]
+RMSEA <- fit_indices["rmsea"]
+TLI <- fit_indices["tli"]
+SRMR <- fit_indices["srmr"]
+chi_square <- fitMeasures(CFA.output, "chisq")
+df <- fitMeasures(CFA.output, "df")
+chi_square_df_ratio <- chi_square / df
+p_value <- fitMeasures(CFA.output, "pvalue")
+# Define thresholds for comparison
+thresholds <- list(
+  chi_square_df_ratio = "<3",
+  CFI = ">0.95",
+  TLI = ">0.95",
+  RMSEA = "<0.06",
+  SRMR = "<0.08",
+  p_value = ">0.05"  # Typical threshold for statistical significance
+)
+
+# Create a data frame for fit indices, thresholds, and comparison results
+fit_indices_table_ordered <- data.frame(
+  Metric = c("Chi-square/df ratio", "CFI", "TLI", "RMSEA", "SRMR", "Chi-square p-value"),
+  Value = c(chi_square_df_ratio, CFI, TLI, RMSEA, SRMR, p_value),
+  Threshold = unlist(thresholds),  # Extract thresholds into a vector
+  Comparison = c("Fail", "Fail", "Fail", "Fail", "Fail", "Fail")  # Placeholder for comparison results
+)
+
+
+
+# Print the ordered table
+print(fit_indices_table_ordered)
+
+```
+To evaluate the fit of our measurement model we need to look at the fit indices, i.e evaluate if the data supports the proposed model. The chi-square test is a actual statistical test that test the model implied covariance matrix against the sample covariance matrix, neither is actually known but can be estimated from the data. The null hypothesis is the chi squared test is that the model implied covariance matrix equals the sample covariance matrix (typical we want P-value above 0.05). however, the chi-squared test is sensitive to sample size, for small samples, rejecting the null can be difficult even if the model is bad and for large samples even small departures from the null can statistical significant. since the chi-squared test has its problems other methods for evaluating the model fit is needed and many different fit indices has been put forward. Unfortunately many of these test are not formal statistical test, and therefore acts more of rule of thumbs or suggested cut off points. Because of the limitation of the chi-squared test and the rule of thumb nature of other fit indices it is important to look at many different fit indices to be able to make a nuanced and holistic evaluation of the model fit. One commonly used fit index that tries to mitigate some of the problem with the chi-squared test is the chi-squared divided by its degrees of freedom, where a cut of point of less or equal than 3 has been suggested. Other fit indices that are commonly used are the Comparative Fit Index (CFI) and Tucker-Lewis Index (TLI) that are comparative fit measures. they both compare the fit of the measurement model to a baseline model, which assumes no relationships among the variables. Their suggested cut of point is 0.95. The RMSEA and the SRMR along with the TLI and CFI are not associated with any statistical tests and the suggested cut of point for RMSEA and SRMR are is 0.06 and 0.08 respectively. 
+
+From looking at the fit indices table it is easy to conclude that the model fit of our measurement model is not a good fit. The p-value for the chi-squared test is closed to zero suggesting a bad fit. From the other non statistical testing based fit indices it is clear that the model does implie a good fit. Chi-squared/df has a value of  82.93 which is far above the suggested cut of point of 3 or less. Ideally we want both the CFI and TLI over 0.95 but unfortunately they are blow that at 0.72 and 0.59 respectively. The same is true for RMSEA and SRMR, both indicates a poor fit. These results lead us to conclude that the specified model does not provide a sufficiently good fit to the observed data. This could mean that our theorized measurement model with the three latent variables Social Ability, Motivation, and Intellect does not adequately capture the actual structure of job performance. 
+
+For the Data, unfortunately, it doesn't pass the test of multivariate normal distribution (see appendix). This violates the assumption of multivariate normal distribution, which mainly affects the reliability of the maximum likelihood estimations of the factor loadings. However, it could still be argued that the data could still be used for factor analysis. While certainty of multivariate normal distribution provides more reliability of the results. Not adhering perfectly to the assumptions does not mean that the results are useless, it can still provide valuable insight just with bigger uncertainty. While not a guarantee, the central limit theorem may also give some leeway regarding the assumption. However, the violation of the normality assumption could still be a factor in the bad fit of the model. 
+
+
+\newpage
+# Reworked and adjusted models
+Given our initial model showed a quite bad fit, it was of interest to test if their was a model that could explain the latent construct job performance. While we recognize that doing this is not strictly a part of this assignment or suitable for a Confirmatory studies, this subsection does not aim to confirm rather be a supplement to get a better understanding of the data. Testing multiple models is not appropriate for a CFA, but given theoretical justification to ensure the validity of the subsequent models it can still be of use, while not being strictly part of the CFA. 
+\newline&nbsp;\newline 
+Trying other models that make theoretical sense, we realized that the PsychTest variables were a major source of problems, causing the model to estimate negative variances, again indicating the lack of correct model identification. 
+```{r Model Intermediate, include=FALSE}
+measurement.model <- '
+
+Delivery =~  ClientSat + SuperSat + ProjCompl
+
+Productivity =~ HrsWrk + HrsTrn
+
+Intellect =~ IQ + YrsEdu
+
+'
+```
+
+```{r,echo=FALSE}
+
+your_model <- suppressWarnings(sem(measurement.model, data = data))
+
+par(mfrow = c(1, 1))
+
+result <- try({
+  semPaths(your_model, whatLabels = "none", layout = "tree2", fixedStyle = FALSE, residuals = TRUE, sizeMan = 8, height = 10, width = 10)
+}, silent = TRUE)
+
+```
+
+**Fit measures of the model:**
+```{r,include=FALSE}
+CFA.output <- cfa(model = measurement.model, # Here you give the model specification.
+                  sample.cov = cor(CFAdata), # Covariance or correlation matrix
+                  sample.nobs = 700, # The number of observations
+                  estimator = "ml", # Estimation technique: Maximum Likelihood
+                  std.lv = TRUE)
+
+```
+```{r, echo=FALSE}
+fit_indices <- fitMeasures(CFA.output)
+
+# Extract specific fit indices with the correct naming convention
+CFI <- fit_indices["cfi"]
+RMSEA <- fit_indices["rmsea"]
+TLI <- fit_indices["tli"]
+SRMR <- fit_indices["srmr"]
+chi_square <- fitMeasures(CFA.output, "chisq")
+df <- fitMeasures(CFA.output, "df")
+chi_square_df_ratio <- chi_square / df
+
+# Define thresholds for comparison
+thresholds <- list(
+  chi_square_df_ratio = 3,
+  CFI = 0.95,
+  TLI = 0.95,
+  RMSEA = 0.06,
+  SRMR = 0.08
+)
+
+# Create a data frame for fit indices, thresholds, and comparison results
+fit_indices_table_ordered <- data.frame(
+  Metric = c("Chi-square/df ratio", "CFI", "TLI", "RMSEA", "SRMR"),
+  Value = c(chi_square_df_ratio, CFI, TLI, RMSEA, SRMR),
+  Threshold = unlist(thresholds),  # Extract thresholds into a vector
+  Comparison = c("Fail", "Fail", "Fail", "Fail", "Pass")
+)
+# Print the ordered table
+print(fit_indices_table_ordered)
+
+```
+
+Number of unique variance and covariance:
+\newline&nbsp;
+7(7+1)/2 = 28
+\newline&nbsp;
+Number of free parameters in the model are 20. Since the 28 > 20 the t-rule is fulfilled. 
+The only part of the 3 indicator rule not fulfilled is that each latent variable has 3 factors, this is not necessary however to make the model identifiable.
+
+The latent factor "Delivery" consists of client and superior satisfaction, in addition to percentage project completion. This variable encompasses how well the work the employee does is delivered. It is expected that these 2 variables are correlated, with more projects being completed leads to more satisfied customers and superiors. 
+\newline&nbsp;\newline 
+The Productivity latent factor relates to the amount of time an employee puts into work, in addition to the time spent educating oneself outside of work, hence also providing valuable time towards relevant work projects.
+\newline&nbsp;\newline 
+The Intellect latent factor is still kept unchanged since the initial model. This one is composed of the variables that have to do with intelligence and education, with the IQ and Years of Education variables respectively. Years of education does not have to do with intelligence directly, they are however related with higher intellect perhaps meaning more education due to having an easier time.
+\newline&nbsp;
+
+The CFI of this model to the data is 0.940, which is notably better and by some might be deemed as a good fit, but there are ways of improving the model.
+
+One such way is modindices, these show the changes that would most improve the model. To include such a change there needs to be a logical / theoretical reason as to why, as described in hte method section. Fixing the correlation of 2 variables  will always reduce the degrees of freedom when estimating the model, however there is a need for justification for these restrictions on the model.
+\newline&nbsp;\newline 
+Printed below are the 3 largest of these modindices. The first, and most impactful one suggests restricting the model by setting the satisfactions of the clients and superiors to covary. In the real world this would make sense, a completed and delivered project that also satisfies the client has reason to satisfy the superiors in the company as well.
+\newpage
+
+```{r,echo=FALSE}
+CFA.output <- suppressWarnings({
+  cfa(
+    model = measurement.model,
+    sample.cov = cor(data),
+    sample.nobs = 700,
+    estimator = "ml",
+    std.lv = TRUE
+  )
+})
+
+mod_indices <- modindices(CFA.output)
+
+sorted_mod_indices <- mod_indices[order(mod_indices$mi, decreasing = TRUE), ]
+
+# Print the top modification indices (e.g., top 5)
+top_mod_indices <- head(sorted_mod_indices, n = 3)
+print(top_mod_indices)
+
+```
+
+Adding this restriction to our model leads us to the final model:
+
+
+```{r Model Final, include=FALSE}
+measurement.model <- '
+
+Delivery =~  ClientSat + SuperSat + ProjCompl
+
+Productivity =~ HrsWrk + HrsTrn
+
+Intellect =~ IQ + YrsEdu
+
+ClientSat ~~ SuperSat
+
+'
+```
+
+**Figure showing the links between the factors and their respective latent variables:**
+
+```{r,echo=FALSE}
+
+your_model <- suppressWarnings(sem(measurement.model, data = data))
+
+par(mfrow = c(1, 1))
+semPaths(your_model, whatLabels = "none", layout = "tree2", fixedStyle = FALSE, residuals = TRUE, sizeMan = 8, height = 10, width = 10)
+
+```
+\newpage
+
+**Fit measures of the new model:**
+```{r,include=FALSE}
+CFA.output <- cfa(model = measurement.model, # Here you give the model specification.
+                  sample.cov = cor(CFAdata), # Covariance or correlation matrix
+                  sample.nobs = 700, # The number of observations
+                  estimator = "ml", # Estimation technique: Maximum Likelihood
+                  std.lv = TRUE)
+
+```
+
+```{r, echo=FALSE}
+fit_indices <- fitMeasures(CFA.output)
+
+# Extract specific fit indices with the correct naming convention
+CFI <- fit_indices["cfi"]
+RMSEA <- fit_indices["rmsea"]
+TLI <- fit_indices["tli"]
+SRMR <- fit_indices["srmr"]
+chi_square <- fitMeasures(CFA.output, "chisq")
+df <- fitMeasures(CFA.output, "df")
+chi_square_df_ratio <- chi_square / df
+
+# Define thresholds for comparison
+thresholds <- list(
+  chi_square_df_ratio = 3,
+  CFI = 0.95,
+  TLI = 0.95,
+  RMSEA = 0.06,
+  SRMR = 0.08
+)
+
+# Create a data frame for fit indices, thresholds, and comparison results
+fit_indices_table_ordered <- data.frame(
+  Metric = c("Chi-square/df ratio", "CFI", "TLI", "RMSEA", "SRMR"),
+  Value = c(chi_square_df_ratio, CFI, TLI, RMSEA, SRMR),
+  Threshold = unlist(thresholds),  # Extract thresholds into a vector
+  Comparison = c("Fail", "Pass", "Pass", "Fail", "Pass")  # Placeholder for comparison results
+)
+
+
+# Print the ordered table
+print(fit_indices_table_ordered)
+
+```
+
+Number of unique variance and covariance:
+\newline&nbsp;
+7(7+1)/2 = 28
+\newline&nbsp;
+Number of free parameters in the model are 21. Since the 28 > 21 the t-rule is fulfilled.
+The only part of the 3 indicator rule not fulfilled is that each latent variable has 3 factors, this is not necessary however to make the model identifiable.
+
+This model has a CFI of 0.988, which is considered a good fit to the data. Leaving out the PsychTest variables made the model identifiable, and with slight modification, it has good fit too. 
+
+
+```{r CFA Estimates, include=FALSE}
+CFA.output <- cfa(model = measurement.model, # Here you give the model specification.
+                  sample.cov = cor(data), # Covariance or correlation matrix
+                  sample.nobs = 700, # The number of observations
+                  estimator = "ml", # Estimation technique: Maximum Likelihood
+                  std.lv = TRUE)
+
+summary(CFA.output, fit.measures = TRUE)
+```
+
+```{r table, echo=FALSE}
+
+# Install and load required packages
+library(knitr)
+
+# Create a data frame with factor loadings
+factor_loadings <- data.frame(
+  Factor = c("Superior Satisfaction", "Client Satisfaction","Project Completion", "Hours of Work", "Hours of Personal Culture", "IQ", "Years of Education"),
+  Delivery = c(0.83, 0.12, 0.97, 0, 0, 0, 0),
+  Productivity = c(0, 0, 0, 1.01, 0.83, 0, 0),
+  Intellect = c(0, 0, 0, 0, 0, 0.58, 0.80)
+)
+
+# Print the data frame as a table
+kable(factor_loadings, format = "markdown", align = "c", caption = "Factor Loadings")
+```
+
+Regarding the factor loadings, Delivery loads project completion and Superior Satisfaction at 0.99 and 0.83 respectively, while only 0.12 for client satisfaction. This likely indicates that this factor measures the delivery of work and its effect within the company, through the satisfaction it creates for the superiors. The loading for the client's satisfaction is less important in this case.
+
+Productivity loads hours of work and hours of personal culture at 1.01 and 0.83 respectively, it is odd to have hours of work load at 1.01, but could be due to an error in how the data was measured. Many models were tried and hours of work had some odd behavior, in this model it acted the most normal.
+
+Intellect loads IQ at 0.58 and years of education at 0.80.
+
+More interestingly, the covariances. Between the latent variables we have Delivery with Productivity covarying 0.99, while the other 2 covariances between Delivery-Intellect, and Productivity-Intellect both being around, with high p-values.
+
+
+
+\newpage
+# Method criticism
+Throughout this report some concerns have been raised. The assumption of multivariate normal distributed data can not be said to be fulfilled, which effects the reliability of the maximum likelihood estimations. Transformation of the data could have been an option, but no transformations were made due to the fact that there were no transformations that we could find that significantly improved the distribution to the point that the assumption was fulfilled.Regarding the EFA, the output of the EFA made up some of the basis for the first measurement model. But as also mentioned earlier, there were some concerns regarding the data and some variables suitability. A approach that could have been appropriate wher to redo the EFA with changes accordingly, since EFA can be an iterative processes. This was not done on the basis that the focus was on the CFA and the EFA was only an aid. 
+Some concerns can be raised about the data, Since the data is most likely created to be used in such exercises there may be no actual underlying link like we are looking for, especially if the data was created in a specific way as to uncover a different type of analysis. 
+
+we recognize that testing more than our original proposed model is not suitable for an CFA, since it leans in on a exploratory approach and can to be a cause of bias and overfitting. But since there were still strong theoretical underpinnings in the models tested, we hope it can be a way to understand the data. 
+ 
+Despite some concerns regarding the data and the methodology we do not believe that it renders our analysis useless. But it is important to keep in mind when interpreting the results. The analysis still gives insight to the latent structures of job performance but with higher uncertainty, which means some caution should be had when interpreting the results. 
+
+
+
+
+
+
+
+
+# Conclusions:
+
+Seeing as the covariances are very extreme, both high and low, the only clear cut conclusions that can be drawn regarding those is that Delivery of work has a strong relationship with Productivity, meaning how much time one puts into work and spends time related to work. Delivery and Intellect may simply not have any strong relationship which might be the case according to these results. 
+
+Productivity and Intellect do have a negative correlation which perhaps could be seen as people with more intellect need less time for their work due to deficiency, however due to the high p-value, this conclusion is not statistically significant at a 5% alpha level.
+
+It does make sense that delivery and Productivity covary, someone who is productive likely uses their time to deliver on project. Intellect as a factor in this analysis has very little correlation to Productivity and Delivery, both of which are different metrics for job performance. The conclusion that can be drawn is that it doesn't matter how smart someone is, it is the time and work they bring that determines results and overall job performance.
+
+
+
+
+\newpage
+# Sources
+Dinno, A. (2009). Exploring the sensitivity of Horn's parallel analysis to the distributional form of simu-lated data. Multivariate Behavioral Research, 44, 362-388
+
+James Gerard Caillier (2010) Factors Affecting Job Performance in
+Public Agencies, Public Performance & Management Review, 34:2, 139-165, DOI: 10.2753/
+PMR1530-9576340201
+
+NG, Thomas W., H. Feldman, DanielL C.(2009) HOW BROADLY DOES EDUCATION CONTRIBUTETO JOB PERFORMANCE?,
+Personnel psychology, 2009-03, Vol.62 (1), p.89-134.
+
+Data:
+https://www.kaggle.com/datasets/michealronn/job-performance?fbclid=IwAR1l7k90
+QAHG176gsnIRr8VQgbaGFASLLiAlA4mZcF94wYXRrZBTolveLYo
+
+
+
+\newpage
+# Appendix
+
+
+Results Bartlett's Test of Sphericity
+```{r bart, echo=TRUE}
+cortest.bartlett(data)
+```
+
+MvN test of the data: 
+```{r MVNtest, echo=FALSE}
+mvn(data, mvnTest = "royston")
+mvn(data, mvnTest = "hz")
+mvn(data, mvnTest = "mardia")
+
+```
+
+Screeplot of the EFA data
+```{r screeplot, echo=FALSE}
+fa.parallel(EFAdata, fm = "ml", fa = "fa")
+```
+
+EFA result, with the oblique factor rotation promax and standardization of the variance of the factors.
+```{r EFA, echo=FALSE}
+
+# Perform EFA
+efa_results <- fa(r = cor(EFAdata), # A data.frame to analyze
+                  nfactors = 3, # Number of factors to extract
+                  fm = "ml", # Estimation technique: Maximum Likelihood
+                  covar = FALSE, # Standardized variables, V(xi) = 1.
+                  rotate = "promax") # Rotation method
+
+
+print(efa_results$loadings, cutoff = 0, sort = TRUE)
+```
+
+There is some concern regarding the factor loadings. Both the variables IQ and YrsEdu have quite low loading on all three factors, suggesting that they might be candidates for removal. Removing IQ and YrsEdu might also alleviate some problems with normality. Secondly, the PsychTest2 variable loads highly on both factors two and three making it in contention for removal. Adding cross factor loading could be fine if strongly motivated by theory, however it could cause problems with identification. Ideally each indicator variable loads highly on a singular factor. Lastly regarding the loadings, all associated variables of the first factor loads quite highly. The factor loading of HrsWrk is close to one, which would suggest a near perfect linear relationship with the factor. 
+
+
+
