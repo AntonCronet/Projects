@@ -1,0 +1,650 @@
+---
+title: "Models"
+author: "Anton Cronet, Erik Füßlein"
+date: "2025-06-02"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# R code blocks for easy copy-pasting
+```{r }
+
+```
+
+```{r , echo=FALSE}
+
+```
+
+
+# Load in processed data, split into train and test split
+
+```{r }
+df <- data_final_aggr
+names(df) # Print variables
+
+#####  Thanos snap half the data to make models run
+
+df <- df[sample(nrow(df), size = floor(0.25 * nrow(df))), ]  # Edit for faster running models
+
+set.seed(123)  # for reproducibility
+n <- nrow(df)
+train_index <- sample(seq_len(n), size = 0.8 * n)
+
+train <- df[train_index, ]
+test  <- df[-train_index, ]
+
+```
+
+
+# Linear Regreession
+
+```{r }
+
+lm_exp <- lm(data_final_aggr, formula = Bikes_Counted ~ . - Date_Hour)
+lm_exp |> summary()
+lm_exp_pred <- data.frame(Date = data_final_aggr$Date_Hour,
+                          Actual = data_final_aggr$Bikes_Counted,
+                          Pred = predict(lm_exp, data_final_aggr))
+# negative prediction possible...
+min(lm_exp_pred$Pred)
+any(grepl("2021-05", data_final_aggr$Date_Hour))
+data_final_aggr[which(grepl("2021-05", data_final_aggr$Date_Hour)),]
+
+
+library(ggplot2)
+# set.seed(0345); samples <- sample(1:(nrow(lm_exp_pred) - 150), 10)
+set.seed(06124); samples <- sample(1:(nrow(lm_exp_pred) - 150), 20)
+
+for (i in 1:length(samples)) {
+  
+  plot <- ggplot(data = lm_exp_pred[samples[i]:(samples[i] + 150),], aes(x = Date, y = Actual), alpha = 0.7) + 
+    geom_line() +
+    geom_line(aes(y = Pred), color = "red")
+  
+  print(plot)
+}
+# Peaks are not so well identified
+# Overprediction in winter!
+
+
+ggplot(data = lm_exp_pred, aes(x = Date, y = Actual), alpha = 0.7)  + geom_line()
+# Periods with data:
+# Note that when not all stations are available, then these dates are not in the sample
+# due to our decisions during aggregation. Only points in time that were green in the Data availability 
+# plot are included!
+
+
+# Negative values.
+# See how fit increases when negative values are all set to zero:
+lm_exp_pred$Pred[which(lm_exp_pred$Pred < 0)] <- 0
+new_rsq <- 1 - ( sum((lm_exp_pred$Pred - lm_exp_pred$Actual)**2) / sum((lm_exp_pred$Actual - mean(lm_exp_pred$Actual))**2) ); print(new_rsq) # only slightly better than before.
+
+
+metrics_lm <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+```
+
+
+# Tree Model
+
+```{r }
+library(tree)
+
+# Initial model
+model <- tree(Bikes_Counted ~ . - Date_Hour, data = train)
+
+# 10-fold cross-validation
+cv_result <- cv.tree(model, K = 10)
+
+# Find optimal tree size
+best_size <- cv_result$size[which.min(cv_result$dev)]
+
+# Prune the tree
+pruned_model <- prune.tree(model, best = best_size)
+
+# Predict on test set using pruned model
+pred <- predict(pruned_model, newdata = test)
+
+# True values
+actual <- test$Bikes_Counted
+
+# Metrics
+mae <- mean(abs(pred - actual))
+rmse <- sqrt(mean((pred - actual)^2))
+r2 <- 1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2)
+
+# Output metrics
+metrics_tree <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+# Training MSE
+train_pred <- predict(pruned_model, newdata = train)
+train_actual <- train$Bikes_Counted
+training_mse <- mean((train_actual - train_pred)^2)
+
+# CV MSE (normalize min deviance by training sample size)
+cv_mse <- min(cv_result$dev) / nrow(train)
+
+# Output MSE losses
+losses_tree <- c(Training_MSE = training_mse, CV_MSE = cv_mse)
+losses_tree
+
+```
+
+# Ensemble 1 - Random Forest
+
+
+```{r }
+
+library(randomForest)
+
+# Remove Date_Hour column
+train_data <- train[, !(names(train) %in% c("Date_Hour"))]
+
+# Separate predictors and target
+x <- train_data[, -which(names(train_data) == "Bikes_Counted")]
+y <- train_data$Bikes_Counted
+
+# Tune mtry using OOB error (MSE)
+best_mtry <- tuneRF(
+  x = x,
+  y = y,
+  mtryStart = 5,
+  stepFactor = 1,
+  improve = 0.01,
+  ntreeTry = 50,
+  trace = TRUE,
+  plot = TRUE
+)
+
+# Extract best mtry
+optimal_mtry <- best_mtry[which.min(best_mtry[, "OOBError"]), "mtry"]
+
+# Fit final model with best mtry and more trees
+model <- randomForest(Bikes_Counted ~ ., data = train_data, ntree = 100, mtry = optimal_mtry, importance = TRUE)
+
+importance(model) # For general interest 
+
+# Predict on training data
+train_pred <- predict(model, newdata = train_data)
+train_actual <- train_data$Bikes_Counted
+
+# Training MSE
+training_mse <- mean((train_actual - train_pred)^2)
+
+# OOB MSE (estimate of CV loss)
+cv_mse <- model$mse[model$ntree]  # mse at last tree
+
+# Prepare test features
+test_data <- test[, !(names(test) %in% c("Date_Hour", "Bikes_Counted"))]
+
+# Predict on test set
+pred <- predict(model, newdata = test_data)
+actual <- test$Bikes_Counted
+
+# Metrics on test set
+mae <- mean(abs(pred - actual))
+rmse <- sqrt(mean((pred - actual)^2))
+r2 <- 1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2)
+
+metrics_ens1 <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+# Output training and CV loss (both MSE)
+losses_rf <- c(Training_MSE = training_mse, CV_MSE = cv_mse)
+
+```
+
+
+
+# Ensemble 2 - Gradient Boosting
+
+Note: gbm package does parallel compute (all CPU cores) - can go heavy on the hyperparameters
+
+```{r }
+# install.packages("gbm")
+library(gbm)
+
+train_data <- train[, !(names(train) %in% c("Date_Hour"))]
+test_data <- test[, !(names(test) %in% c("Date_Hour", "Bikes_Counted"))]
+
+set.seed(123)
+model_gbm <- gbm(
+  Bikes_Counted ~ .,
+  data = train_data,
+  distribution = "gaussian",
+  n.trees = 400, 
+  interaction.depth = 2,
+  shrinkage = 0.05,
+  cv.folds = 20
+)
+
+best_iter <- gbm.perf(model_gbm, method = "cv", plot.it = FALSE) # Plot is made later with legend
+
+pred <- predict(model_gbm, newdata = test_data, n.trees = best_iter)
+actual <- test$Bikes_Counted
+
+mae <- mean(abs(pred - actual))
+rmse <- sqrt(mean((pred - actual)^2))
+r2 <- 1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2)
+
+metrics_ens2 <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+
+# Training loss (MSE) at each iteration
+train_loss <- model_gbm$train.error
+
+# Validation loss (CV MSE) at each iteration
+val_loss <- model_gbm$cv.error
+
+# Plot both losses
+plot(train_loss, type = "l", col = "grey", lwd = 2, ylab = "MSE", xlab = "Number of Trees")
+lines(val_loss, col = "orange", lwd = 2)
+legend("topright", legend = c("Training MSE", "CV MSE"), col = c("grey", "orange"), lwd = 2)
+
+
+```
+
+# Neural Network Train
+
+```{r }
+library(keras)
+library(dplyr)
+library(recipes)
+
+# Remove unused columns
+train_data <- train %>% select(-Date_Hour)
+test_data <- test %>% select(-Date_Hour, -Bikes_Counted)
+
+# Define preprocessing using `recipes`
+rec <- recipe(Bikes_Counted ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors()) %>%      # one-hot encode categoricals
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors()) %>%
+  prep()
+
+# Apply preprocessing
+x_train <- bake(rec, new_data = train_data) %>% select(-Bikes_Counted) %>% as.matrix()
+x_test <- bake(rec, new_data = test_data) %>% as.matrix()
+
+y_train <- train_data$Bikes_Counted
+y_test <- test$Bikes_Counted
+
+# Build Keras model
+model <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu", input_shape = ncol(x_train)) %>%
+  layer_dropout(rate = 0.2) %>% # The key to reduce overfitting
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1)
+
+model %>% compile(
+  loss = "mse",
+  optimizer = optimizer_adam(),
+  metrics = list("mae")
+)
+
+# Train model
+history <- model %>% fit(
+  x_train, y_train,
+  epochs = 50,
+  batch_size = 32,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+plot(history) # Avoids per-epoch output, but keeps loss plot
+
+```
+
+
+```{r }
+# Predict + evaluate
+pred <- model %>% predict(x_test) %>% as.vector()
+
+mae <- mean(abs(pred - y_test))
+rmse <- sqrt(mean((pred - y_test)^2))
+r2 <- 1 - sum((y_test - pred)^2) / sum((y_test - mean(y_test))^2)
+
+metrics_nn <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+
+```
+
+# PCA
+```{r}
+# Drop non-numeric / ID columns from training data
+df_base <- df[, !(names(df) %in% c("Date_Hour"))]
+
+# Define categorical variables to one-hot encode
+categorical_vars <- c("precip_type", "cloud_cover", "Hour", "Weekday", "Holiday", 
+                      "School_holidays", "wind_dir", "Month")
+
+# One-hot encode categorical variables using model.matrix (no intercept)
+dummies <- model.matrix(~ . -1, data = df_base[, categorical_vars])
+
+# Extract numeric variables
+numeric_vars <- df_base[, !(names(df_base) %in% categorical_vars)]
+
+# Combine numeric variables and dummy variables
+df_encoded <- cbind(numeric_vars, dummies)
+
+# Remove rows with NA in training set
+clean_df <- na.omit(df_encoded)
+
+# Run PCA on scaled data
+pca <- prcomp(clean_df, scale. = TRUE)
+
+# Summary and scree plot
+summary(pca)
+plot(pca, type = "l")
+
+# Choose first 3 PCs
+train_pca <- as.data.frame(pca$x[, 1:3])
+
+# Add response variable (assuming Bikes_Counted is in clean_df or df)
+train_pca$Bikes_Counted <- clean_df$Bikes_Counted
+
+# Prepare test set:
+
+# Select same variables (numeric + dummies) from test, except Date_Hour
+test_base <- test[, !(names(test) %in% c("Date_Hour"))]
+
+# One-hot encode categorical vars in test with model.matrix
+test_dummies <- model.matrix(~ . -1, data = test_base[, categorical_vars])
+
+# Numeric vars in test
+test_numeric <- test_base[, !(names(test_base) %in% categorical_vars)]
+
+# Combine test numeric + dummies
+test_encoded <- cbind(test_numeric, test_dummies)
+
+# Make sure test_encoded has the same columns as clean_df (train encoded)
+# If test has missing columns, add them with zeros
+missing_cols <- setdiff(names(clean_df), names(test_encoded))
+for(col in missing_cols) {
+  test_encoded[, col] <- 0
+}
+
+# Drop extra columns in test not in train
+extra_cols <- setdiff(names(test_encoded), names(clean_df))
+if(length(extra_cols) > 0) test_encoded <- test_encoded[, !(names(test_encoded) %in% extra_cols)]
+
+# Order columns to match train
+test_encoded <- test_encoded[, names(clean_df)]
+
+# Remove rows with NA in test (optional)
+test_encoded <- na.omit(test_encoded)
+
+# Scale test set using train PCA parameters
+test_scaled <- scale(test_encoded, center = pca$center, scale = pca$scale)
+
+# Apply PCA rotation on test set (first 3 PCs)
+test_pca <- as.data.frame(test_scaled %*% pca$rotation[, 1:3])
+
+# Add response variable to test PCA dataframe
+test_pca$Bikes_Counted <- test$Bikes_Counted
+
+``` 
+
+
+
+# Linear Regreession (PCA)
+
+```{r }
+
+
+metrics_lm_pca <- c(MAE = mae, RMSE = rmse, R2 = r2) 
+```
+
+
+# Tree Model (PCA)
+
+```{r }
+library(rpart)
+
+# Train initial tree model on PCA-transformed training data
+model_pca <- rpart(Bikes_Counted ~ ., data = train_pca, method = "anova", cp = 0)
+
+# Use cross-validation info to find optimal cp
+best_cp_pca <- model_pca$cptable[which.min(model_pca$cptable[, "xerror"]), "CP"]
+
+# Prune the tree
+pruned_model_pca <- prune(model_pca, cp = best_cp_pca)
+
+# Predict on PCA-transformed test data
+pred_pca <- predict(pruned_model_pca, newdata = test_pca)
+
+# True values
+actual_pca <- test_pca$Bikes_Counted
+
+# Metrics
+mae_pca <- mean(abs(pred_pca - actual_pca))
+rmse_pca <- sqrt(mean((pred_pca - actual_pca)^2))
+r2_pca <- 1 - sum((actual_pca - pred_pca)^2) / sum((actual_pca - mean(actual_pca))^2)
+metrics_tree_pca <- c(MAE = mae_pca, RMSE = rmse_pca, R2 = r2_pca)
+
+# Training MSE
+train_pred_pca <- predict(pruned_model_pca, newdata = train_pca)
+train_actual_pca <- train_pca$Bikes_Counted
+training_mse_pca <- mean((train_actual_pca - train_pred_pca)^2)
+
+# CV MSE (xerror * variance of response)
+cv_mse_pca <- min(model_pca$cptable[, "xerror"]) * var(train_actual_pca)
+
+# Output MSE losses
+losses_tree_pca <- c(Training_MSE = training_mse_pca, CV_MSE = cv_mse_pca)
+
+```
+
+# Ensemble 1 (PCA)
+
+```{r }
+library(randomForest)
+
+# Separate predictors and target from PCA data
+x_pca <- train_pca[, -which(names(train_pca) == "Bikes_Counted")]
+y_pca <- train_pca$Bikes_Counted
+
+# Tune mtry on PCA-transformed data
+best_mtry_pca <- tuneRF(
+  x = x_pca,
+  y = y_pca,
+  mtryStart = 3,
+  stepFactor = 1.5,
+  improve = 0.01,
+  ntreeTry = 100,
+  trace = TRUE,
+  plot = TRUE
+)
+
+# Get best mtry value
+optimal_mtry <- best_mtry_pca[which.min(best_mtry_pca[, "OOBError"]), "mtry"]
+```
+
+```{r }
+
+# Train random forest with optimal mtry
+rf_pca <- randomForest(
+  Bikes_Counted ~ .,
+  data = train_pca,
+  ntree = 100,
+  mtry = optimal_mtry,
+  importance = TRUE
+)
+plot(rf_pca) # Plots Out Of Bag error = MSE
+# importance(rf_pca) # Which varaibles are ost important 
+
+
+# Predict on test set
+preds <- predict(rf_pca, newdata = test_pca)
+actuals <- test_pca$Bikes_Counted
+
+# Evaluation metrics
+mae <- mean(abs(preds - actuals))
+rmse <- sqrt(mean((preds - actuals)^2))
+r2 <- 1 - sum((actuals - preds)^2) / sum((actuals - mean(actuals))^2)
+
+# Store metrics
+metrics_ens1_pca <- c(MAE = mae, RMSE = rmse, R2 = r2)
+
+# Predict on training set
+train_preds <- predict(rf_pca, newdata = train_pca)
+train_actuals <- train_pca$Bikes_Counted
+
+# Training MSE
+training_mse_pca <- mean((train_actuals - train_preds)^2)
+
+# OOB MSE (last value in model$mse)
+cv_mse_pca <- rf_pca$mse[rf_pca$ntree]
+
+# Store losses
+losses_rf_pca <- c(Training_MSE = training_mse_pca, CV_MSE = cv_mse_pca)
+losses_rf_pca
+
+```
+
+# Ensemble 2 (PCA)
+
+```{r }
+library(gbm)
+
+# Use PCA-transformed training and test data
+train_data_pca <- train_pca
+test_data_pca <- test_pca[, -which(names(test_pca) == "Bikes_Counted")]
+
+set.seed(123)
+model_gbm_pca <- gbm(
+  Bikes_Counted ~ .,
+  data = train_data_pca,
+  distribution = "gaussian",
+  n.trees = 200,
+  interaction.depth = 2,
+  shrinkage = 0.05,
+  cv.folds = 15
+)
+
+# Best number of trees based on CV
+best_iter_pca <- gbm.perf(model_gbm_pca, method = "cv", plot.it = FALSE)
+
+# Predict on test set
+pred_pca <- predict(model_gbm_pca, newdata = test_data_pca, n.trees = best_iter_pca)
+actual_pca <- test_pca$Bikes_Counted
+
+# Evaluation metrics
+mae_pca <- mean(abs(pred_pca - actual_pca))
+rmse_pca <- sqrt(mean((pred_pca - actual_pca)^2))
+r2_pca <- 1 - sum((actual_pca - pred_pca)^2) / sum((actual_pca - mean(actual_pca))^2)
+
+# Store test metrics
+metrics_ens2_pca <- c(MAE = mae_pca, RMSE = rmse_pca, R2 = r2_pca)
+
+# Training and CV loss over iterations
+train_loss_pca <- model_gbm_pca$train.error
+val_loss_pca <- model_gbm_pca$cv.error
+
+# Plot training and validation MSE
+plot(train_loss_pca, type = "l", col = "grey", lwd = 2, ylab = "MSE", xlab = "Number of Trees")
+lines(val_loss_pca, col = "orange", lwd = 2)
+legend("topright", legend = c("Training MSE", "CV MSE"), col = c("grey", "orange"), lwd = 2)
+
+# Store selected losses
+losses_gbm_pca <- c(Training_MSE = train_loss_pca[best_iter_pca], CV_MSE = val_loss_pca[best_iter_pca])
+
+
+```
+
+# Neural Network (PCA)
+
+```{r }
+library(keras)
+
+# Prepare PCA-based training and test matrices
+x_train_pca <- train_pca[, -which(names(train_pca) == "Bikes_Counted")] %>% as.matrix()
+x_test_pca <- test_pca[, -which(names(test_pca) == "Bikes_Counted")] %>% as.matrix()
+
+y_train_pca <- train_pca$Bikes_Counted
+y_test_pca <- test_pca$Bikes_Counted
+
+# Build Keras model
+model_pca <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu", input_shape = ncol(x_train_pca)) %>%
+  layer_dropout(rate = 0.2) %>% # The key to reduce overfitting
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1)
+
+model_pca %>% compile(
+  loss = "mse",
+  optimizer = optimizer_adam(),
+  metrics = list("mae")
+)
+
+# Train model
+history_pca <- model_pca %>% fit(
+  x_train_pca, y_train_pca,
+  epochs = 200,
+  batch_size = 16,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+plot(history_pca)
+
+
+# Predict and evaluate
+pred_pca <- model_pca %>% predict(x_test_pca) %>% as.vector()
+
+mae_pca <- mean(abs(pred_pca - y_test_pca))
+rmse_pca <- sqrt(mean((pred_pca - y_test_pca)^2))
+r2_pca <- 1 - sum((y_test_pca - pred_pca)^2) / sum((y_test_pca - mean(y_test_pca))^2)
+
+metrics_nn_pca <- c(MAE = mae_pca, RMSE = rmse_pca, R2 = r2_pca)
+
+
+```
+
+```{r }
+
+# Predict and evaluate
+pred_pca <- model_pca %>% predict(x_test_pca) %>% as.vector()
+
+mae_pca <- mean(abs(pred_pca - y_test_pca))
+rmse_pca <- sqrt(mean((pred_pca - y_test_pca)^2))
+r2_pca <- 1 - sum((y_test_pca - pred_pca)^2) / sum((y_test_pca - mean(y_test_pca))^2)
+
+metrics_nn_pca <- c(MAE = mae_pca, RMSE = rmse_pca, R2 = r2_pca)
+
+```
+
+
+
+
+```{r }
+# Combine all metric vectors into a list
+metrics_list <- list(
+  lm = metrics_lm,
+  tree = metrics_tree,
+  ens1 = metrics_ens1,
+  ens2 = metrics_ens2,
+  nn = metrics_nn,
+  lm_pca = metrics_lm_pca,
+  tree_pca = metrics_tree_pca,
+  ens1_pca = metrics_ens1_pca,
+  ens2_pca = metrics_ens2_pca,
+  nn_pca = metrics_nn_pca
+)
+
+# Convert to data frame
+metrics_df <- do.call(rbind, metrics_list)
+
+# Add model names as a column
+metrics_df <- data.frame(Model = rownames(metrics_df), metrics_df, row.names = NULL)
+
+# Print nicely
+print(metrics_df)
+
+# Optional: pretty table
+library(knitr)
+kable(metrics_df, digits = 3, caption = "Model Performance Metrics")
+```
+
+

@@ -1,0 +1,9 @@
+/data/archive/
+/rmd/bikedata_dir/
+/tmp/
+/bikedata_dir/
+/rmd/tmp/
+*.Rhistory*
+*.RData*
+*.Rhistory*
+*.~lock.*

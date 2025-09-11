@@ -1,0 +1,1554 @@
+---
+title: "Predicting bike traffic with weather data"
+author: "Anton Cronet, Erik Füßlein"
+date: "2025-05-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+
+# IMPORTANT! Do you only want to load final data or go through whole
+# preparation?
+process_raw_data <- FALSE
+load_final_data <- !process_raw_data
+```
+
+
+**/!\ IMPORTANT /!\**
+When you keep the original data hierarchy, you will just have to specify your base directory as **wd** in the following chunk:
+```{r}
+
+
+if(Sys.info()["nodename"] == "ERIKS_LAPTOP") {
+  wd <- "C:/Users/der-s/Desktop/Uni/SoSe25/SML/coursework"
+} else {
+  wd <- "/Users/antoncronet/Documents/Coding/coursework_sml"
+}
+
+```
+
+
+# Project description
+This project's purpose is to predict **bike traffic by means of weather data**. Therefore, we used freely available data on bike traffic collected at 5 bike counting stations in the Rhein-Neuss district in North-Rhine-Westphalia, Germany, and merged it with equally freely available data from the Deutsche Wetterdienst for Düsseldorf, which is geographically the weather station with the highest proximity to the area where the bike traffic was counted (just on the opposite side of the river Rhine).
+
+We will only be using data for the dates on which all of the five counting stations reported some traffic and aggregated these, such that we do not do separated predictions for the stations but rather for the 'general traffic' at the corresponding point in time.
+
+The explanatory variables are in most of the cases on an hourly aggregation base, and this is where our regression is taking place. Some are only available on a daily basis -- for simplicity, we assume them to be constant throughout the day -- and we will use dummies implied by the date (Hour, Month, Weekday) and dummies for national holidays and school holidays.
+
+We warmly recommend to consult our **variable list**: `data/raw/VariableList.xlsx`.
+It provides you with information on the DWD abbreviations, our assigned variable names, the format before and after final processing, measuring units and, if necessary, an explanation.
+
+
+# Introductory settings
+
+**NOTE:** If you want to reproduce the whole data preparation process with all steps, you have to change the `process_raw_data` variable definition to `TRUE`. Otherwise, the code will just take into account the data that 
+
+The sources can be inspected at: `<project directory>/data/raw/sources.ods`.
+
+
+
+
+
+# Data processing
+Can optionally be done from the very beginning, with `process_raw_data <- TRUE` in the **R setup**. Otherwise, the preprocessed data will be loaded instead, which saves roughly 5min of running time.
+
+
+
+```{r Final Data Loading, eval = load_final_data}
+if(load_final_data) {
+# If data preparation not desired, just load the already saved data.
+data_final_aggr <- readRDS(paste(wd, "data/final/data_final_bike_weather.RDS", sep = "/"))
+  }
+
+```
+
+Extensive data preparation:
+```{r Raw Data Preparation, eval = process_raw_data}
+
+if(process_raw_data) {
+  
+# ==============================================================================
+# Bike traffic data
+# ==============================================================================
+
+# Unzip the zip files
+unzip(paste(wd, "data/raw/eco-counter-data.zip", sep = "/"), exdir = "bikedata_dir")
+bike_data <- read.csv("bikedata_dir/eco-counter-data.csv", sep = ";")
+head(bike_data$Datum)
+bike_data$Date <- as.Date(substr(bike_data$Datum, 1, 10))
+bike_data$Hour <- as.double(substr(bike_data$Datum, 12, 13))
+
+# Junk information: No variation, useless
+unique(substr(bike_data$Datum, 11, 11))
+unique(substr(bike_data$Datum, 14, 26))
+#bike_data$Datum <- NULL
+# Machine-readable date
+bike_data$Date_Hour <- as.POSIXct(paste(bike_data$Date, " ", bike_data$Hour, ":00", sep = ""), format = "%Y-%m-%d %H:%M")
+bike_data$Weekday <- weekdays(bike_data$Date, abbreviate = TRUE)
+
+
+
+# Data still is in 10-min frequency. Aggregate on hourly base.
+hourly_info <- bike_data[!duplicated(paste(bike_data$Date_Hour, bike_data$Zählstelle)), - which(colnames(bike_data) == "Anzahl")]
+hourly_number <- aggregate(data = bike_data, Anzahl ~ Date_Hour + Zählstelle, sum)
+
+bike_data_aggr <- merge(hourly_info, hourly_number,
+                        by = c("Date_Hour", "Zählstelle"))
+ 
+aggregate(data = bike_data_aggr, Date_Hour ~ Zählstelle, min)
+aggregate(data = bike_data_aggr, Date_Hour ~ Zählstelle, max)
+table(bike_data_aggr$Zählstelle)
+
+
+nrow(bike_data) / nrow(bike_data_aggr) # with full data it should be 6.
+# Different data availability times is reason for incomplete data in whole time set
+sum(is.na(bike_data$Anzahl))
+sum(is.na(bike_data_aggr$Anzahl)) # we got rid of all NAs during merging.
+
+# Plausibility check:
+# Daily aggregation
+plot(aggregate(data = bike_data_aggr, Anzahl ~ Hour, sum)) # Aggregation is probably
+# right when night time has less bikers
+
+# Weekday aggregation
+plot(aggregate(data = bike_data_aggr, Anzahl ~ as.factor(Weekday), sum))
+# Monthly aggregation
+plot(aggregate(data = bike_data_aggr, Anzahl ~ format(substr(Date, 6,7), format = "%m"), sum))
+# Days of the year aggregation
+plot(aggregate(data = bike_data_aggr, Anzahl ~ as.Date(substr(Date, 6,10), format = "%m-%d"), sum))
+
+# SIMPLIFICATIONS
+colnames(bike_data_aggr)
+unique(paste(bike_data_aggr$Zählstelle, bike_data_aggr$Id))
+bike_data_aggr$Id <- NULL # ID not needed
+bike_data_aggr$Koordinaten <- NULL # not needed
+bike_data_aggr$Datum <- NULL # date has been transformed to useful
+unique(bike_data_aggr$Status)
+bike_data_aggr$Status <- NULL # we will not examine quality of measurement
+unique(bike_data_aggr$Channel.Id) # not useful for our purpose
+bike_data_aggr$Channel.Id <- NULL
+
+
+
+
+# ==============================================================================
+# Meteorological hourly data - for Düsseldorf (very close to the places that are relevant for us)
+# ==============================================================================
+
+# What it interesting: 
+# Added manually after inspection of the Metadaten_Parameter_<...>_01078.html
+# files which are to be found in the zip files in the data/raw directory,
+# or -- after running the code -- in the unpacked zip folders.
+
+var_of_int <- c(Date_Hour = "Date_Hour",
+                V_N = "cloud_cover",
+                V_TE002 = "tmp_soil",
+                DD = "wind_degree",
+                FF = "wind_speed",
+                FX_911 = "wind_highest_last_h",
+                TT = "air_temp",
+                R1 = "precip_h_mm",
+                RS_ind = "precip_h_indicator",
+                WRTR = "precip_type",
+                SD_SO = "sunshine_duration",
+                RF_STD = "rel_humidity",
+                P_STD = "air_pressure",
+                V_VV = "visibility",
+                WW = "observed_weather")
+
+# List of files
+filelist_meteo <- list.files(path = paste(wd, "data/raw", sep = "/"))
+# Read in hourly data + NOT the verbal description, will not be of interest
+filelist_meteo <- filelist_meteo[intersect(which(grepl("stundenwerte", filelist_meteo)),
+                                           which(!grepl("WW", filelist_meteo)))]
+
+# Loop for unzipping data
+for(i in 1:length(filelist_meteo)) {
+  
+  tmp_dir <- paste("tmp/", substr(filelist_meteo[i], 1, 15), sep = "")
+  
+  unzip_dir <- unzip(paste(wd, "data/raw", filelist_meteo[i], sep = "/"), 
+                     exdir = tmp_dir)
+  
+  list_files_zip <- list.files(tmp_dir)
+  relevant_csv <- list_files_zip[which(grepl("produkt", list_files_zip))]
+  csv <- read.csv(paste(tmp_dir, relevant_csv, sep = "/"), sep = ";")
+    
+  probe <- read.csv(paste(tmp_dir, relevant_csv, sep = "/"), sep = ";", fileEncoding = "UTF-8")
+  
+  # Identify NAs, encoded as -999
+  csv[csv == -999] <- NA
+  
+  # Construct uniform date
+  csv$Date_Hour <- as.POSIXct(paste(substr(csv$MESS_DATUM, 1, 4), "-",
+                                    substr(csv$MESS_DATUM, 5, 6), "-",
+                                    substr(csv$MESS_DATUM, 7, 8), " ",
+                                    substr(csv$MESS_DATUM, 9, 10), ":00",
+                                    sep = ""),
+                              format = "%Y-%m-%d %H:%M")
+  
+  # Only needed for certain period
+  csv <- csv[csv$Date_Hour >= "2015-11-16 23:00:00",]
+  csv <- csv[rowSums(is.na(csv)) < ncol(csv),]
+  
+  # Save only what is relevant for final data, and check no double saving happens.
+  keep_cols <- if(!"csv_pass" %in% ls()){
+      which(colnames(csv) %in% names(var_of_int))
+    } else {
+      intersect(which(colnames(csv) %in% names(var_of_int)),
+                which(!var_of_int[colnames(csv)] %in% colnames(csv_pass)[-which(colnames(csv_pass) == "Date_Hour")]))
+    } 
+  
+  csv_final <- csv[, keep_cols]
+  
+  # When no relevant var_of_interest in the table:
+  # No further processing
+  if(is.null(ncol(csv_final))) {next}
+  
+  
+  colnames(csv_final) <- var_of_int[colnames(csv_final)]
+  
+  # If it does not exist -> initiate the data frame
+  # If it exists -> merge the new columns with the existing ones
+  if(i == 1) {
+    csv_pass <- csv_final
+  } else {
+    csv_pass <- merge(csv_final, csv_pass, all.x = TRUE, all.y = TRUE, by = "Date_Hour")
+  }
+
+  # Bring it together with the hourly bike data 
+  weather_data_final <- merge(csv_pass, bike_data_aggr, by = "Date_Hour")
+  
+
+
+}
+
+
+length(which(weather_data_final$wind_degree == 360))
+
+
+colnames(weather_data_final)
+
+# Just for test whether data can already be usefully used
+first_lm <- lm(data = weather_data_final[weather_data_final$Zählstelle == "Meerbusch",], Anzahl ~ air_temp + as.factor(Hour) + as.factor(Weekday) + wind_speed)
+summary(first_lm)
+
+
+unique(weather_data_final$Zählstelle)
+# What is most busy station
+aggregate(weather_data_final, Anzahl ~ Zählstelle, sum)
+# Strong wind -> correlation with some direction?
+plot(aggregate(weather_data_final, wind_highest_last_h ~ wind_degree, mean))
+
+
+
+colSums(is.na(weather_data_final))
+
+# Look whether the NAs in sunshine duration come from reporting NA instead of 
+# 0 at night
+length(intersect(which(is.na(weather_data_final$sunshine_duration)),
+                 which(as.numeric(substr(weather_data_final$Date_Hour, 12, 13)) %in% c(21, 22, 23, 0, 1, 2)) ))
+
+# When data is not available and it is at night, then assume 0min of sunshine
+weather_data_final$sunshine_duration[intersect(which(is.na(weather_data_final$sunshine_duration)),
+                 which(as.numeric(substr(weather_data_final$Date_Hour, 12, 13)) %in% c(21, 22, 23, 0, 1, 2)) )] <- 0
+
+
+# Plausibility checks
+# Yearly mean temperatures
+plot(aggregate(weather_data_final, air_temp ~ (substr(Date_Hour, 1, 4)), mean), type = "l")
+# Mean temperature at the days of the year
+plot(aggregate(weather_data_final, air_temp ~ as.Date(substr(Date_Hour, 6, 10), format = "%m-%d"), mean), type = "l")
+# Bike traffic at calendar dates
+plot(aggregate(bike_data_aggr, Anzahl ~ as.Date(substr(Date_Hour, 6, 10), format = "%m-%d"), sum))
+
+# Give english column name for number of bikes
+colnames(weather_data_final) <- gsub("Anzahl", "Bikes_Counted", colnames(weather_data_final))
+
+
+
+
+
+# ==============================================================================
+# More detailed meteorological data on daily aggregation
+# ==============================================================================
+
+# More variables are available if we are not only looking at hourly, but daily
+# aggregation basis.
+
+# csv for structure inspection
+# https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/subdaily/standard_format/formate_kl.html
+
+# Can be obtained from:
+data_subdaily <- read.csv(file = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/subdaily/standard_format/kl_10400_00_akt.txt")[1,]
+# Visually, this is a mess!
+
+# Automatical column assignment
+# Use html meta-file for more rapid data identification -- position in string is required
+# Structure of html file allows for quick identification of position in string for 
+# relevant variables
+library(rvest)
+url <- "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/subdaily/standard_format/formate_kl.html"
+page <- read_html(url)
+table <- page |> html_table(fill = TRUE)
+table_html <- table[[1]]
+colnames(table_html) <- table_html[1,]
+table_html <- table_html[-1,]
+
+table_html <- data.frame(Label = table_html$Label, 
+                         start_pos = as.numeric(table_html$Pos))
+# Find out difference between starting points of variable entries
+width_of_col <- diff(table_html$start_pos)
+# Define widths of the separated variable entry 'columns'
+width_of_col <- c(width_of_col, (nchar(data_subdaily) - sum(width_of_col)))
+
+# This is fwf data:
+# One string, and only by providing the column lengths it can split it up
+# We know the widths now, as well as the relevant variables.
+data_subdaily <- read.fwf("https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/subdaily/standard_format/kl_10393_00_akt.txt",
+                 widths = width_of_col, stringsAsFactors = FALSE,
+                 col.names = table_html$Label)
+
+#data_subdaily[1, 1:10]
+# Create machine-readible dates from the data columns
+data_subdaily$Date_Year <- as.Date(paste(data_subdaily$JA, 
+                                         sprintf("%02d", data_subdaily$MO), # paste as 2digit
+                                         sprintf("%02d", data_subdaily$TA), 
+                                         sep = "-"))
+# Filter only relevant time period
+data_subdaily <- data_subdaily[data_subdaily$Date_Year >= "2015-11-16",]
+ 
+
+# Select only relevant columns -> cf. https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/subdaily/standard_format/formate_kl.html
+
+subdaily_var_of_int <- c(Date_Year = "Date_Year",
+                         SDK = "sunshine_dur_day",
+                         E1 = "soilstate_7am",
+                         VAK = "type_precip",
+                         SHK = "snow_cover_cm")
+
+# Find which are available AND of interest, only keep these
+data_subdaily <- data_subdaily[, which(colnames(data_subdaily) %in% names(subdaily_var_of_int))]
+# Assign human-interpretable colnames
+colnames(data_subdaily) <- subdaily_var_of_int[colnames(data_subdaily)]
+
+# Identify NAs -> again, encoded as -99
+data_subdaily[data_subdaily == -99] <- NA
+
+# Plausability analysis: Snow coverage by calendar date
+plot(aggregate(data_subdaily, snow_cover_cm ~ as.Date(substr(Date_Year, 6, 10), format = "%m-%d"), mean), type = "l")
+
+# Prepare for hourly merging -> clone each row 24 times and create artificial
+# time column
+data_subdaily <- data_subdaily[rep(1:nrow(data_subdaily), each = 24),]
+data_subdaily$Hour <- rep(sprintf("%02d", 0:23), times = (nrow(data_subdaily) / 24))
+data_subdaily$Date_Hour <- paste(data_subdaily$Date_Year, " ", data_subdaily$Hour, ":00:00", sep = "") |> as.POSIXct(format = "%Y-%m-%d %H:%M")
+data_subdaily$Date_Year <- NULL; data_subdaily$Hour <- NULL
+
+
+# Merge with final data
+weather_data_PRELIM <- merge(weather_data_final, data_subdaily, by = "Date_Hour", all.x = TRUE)
+
+# CHECK whether the new df WITHOUT the daily data corresponds exactly
+# to the df before to exclude some merging fails
+identical(weather_data_final[, intersect(colnames(weather_data_final), colnames(weather_data_PRELIM))], 
+          weather_data_PRELIM[, intersect(colnames(weather_data_final), colnames(weather_data_PRELIM))])
+
+# Delete tmp version
+weather_data_final <- weather_data_PRELIM; weather_data_PRELIM <- NULL
+
+
+
+
+# =========================================
+# Holiday data
+# =========================================
+
+# Use webscraping!
+
+# Initiate: Look for years, prepare empty vector
+years2check <- unique(substr(weather_data_final$Date_Hour, 1, 4))
+holidays <- c()
+
+for(i in 1:length(years2check)) {
+  
+  # Make use of structured urls
+  address2check <- paste("https://www.schulferien.org/Kalender_mit_Ferien/kalender_", years2check[i], "_ferien_Nordrhein_Westfalen.html", sep = "")
+  
+  page <- read_html(address2check)
+  text <- page |> html_nodes(".feiertag_liste_row") |> html_text()
+  # holidays are stored always in that node!
+  # for compatability, translation of Mär to Mrz is needed
+  # Make use of unique structure and retrieve day, month, year
+  dates <- paste(gsub("Mär", "Mrz", substr(text, 16, 22)), substr(text, 38, 41), sep = " ") |> as.Date(format = "%d. %b %Y", locale = "de_DE")
+  
+  # add to holiday vector
+  holidays <- c(holidays, dates)
+  
+}
+
+# Re-convert from numeric to actual date
+holidays <- holidays |> as.Date(origin = "1970-01-01") 
+
+
+
+# Do the same for school holidays
+school_holidays <- c()
+
+for(i in 1:length(years2check)) {
+
+  address2check <- paste("https://www.schulferien.org/Kalender_mit_Ferien/kalender_", years2check[i], "_ferien_Nordrhein_Westfalen.html", sep = "")
+
+  page <- read_html(address2check)
+  
+  # holiday data most easily retrieved like this
+  text_raw <- page |> html_nodes("td") |> html_attr("data-tip-text")
+  text_raw <- text_raw[-which(is.na(text_raw))]
+  # Delete superficial text information
+  text_raw <- gsub("</span><br>Nordrhein-Westfalen  <br>", " ", gsub("<span class=\"tmv_tooltip_title\">", "", text_raw))
+  
+  # Look for structured information which indicates a timespan between two dates
+  school_holidays_year <- unlist(regmatches(text_raw, gregexpr(text_raw, pattern = "\\d{2}\\.\\d{2}\\.\\d{4} - \\d{2}\\.\\d{2}\\.\\d{4}"))) |> unique()
+  
+  hol_in_y <- c()
+  
+  # Only beginning and end date known until now, we want all days in between as well
+  for(j in 1:length(school_holidays_year)) {
+    obj <- school_holidays_year[j]
+    date1 <- as.Date(substr(obj, 1, 10), format = "%d.%m.%Y")
+    date2 <- as.Date(substr(obj, 14, nchar(obj)), format = "%d.%m.%Y")
+    holiday_seq <- date1:date2
+    hol_in_y <- c(hol_in_y, holiday_seq)
+  }
+  
+  # Store values in the array
+  school_holidays <- c(school_holidays, hol_in_y)
+  
+
+}
+
+# Again, machine readible date needed.
+school_holidays <- school_holidays |> as.Date(origin = "1970-01-01")
+
+
+
+# Add to final data set: As dummies is most useful!
+# Check for each date whether it is in the holidays or school_holidays array
+weather_data_final$Holiday <- ifelse(weather_data_final$Date %in% holidays, 1, 0)
+# Plausibility check
+table(weather_data_final$Holiday)
+weather_data_final$School_holidays <- ifelse(weather_data_final$Date %in% school_holidays, 1, 0)
+# Plausibility check
+table(weather_data_final$School_holidays)
+
+
+
+
+
+
+
+# Final cleaning
+# Which columns have more than 5% NA still?
+which(colSums(is.na(weather_data_final)) > 0.05 * nrow(weather_data_final))
+
+# DELETE
+unique(weather_data_final$tmp_soil)
+weather_data_final$tmp_soil <- NULL
+
+head(weather_data_final$precip_type, 20) 
+# Every third element seems to be missing. Check that:
+aggregate(is.na(weather_data_final$precip_type), by = list(rep(1:3, length.out = nrow(weather_data_final)),
+                                                           weather_data_final$Zählstelle),
+          FUN = sum)
+
+# Third of value missing.
+sum(is.na(weather_data_final$precip_type)) / nrow(weather_data_final)
+
+# Why is that? There is a reason:
+# cf. rmd/tmp/stundenwerte_RR/Metadaten_Parameter_rr_stunde_01078.html:
+# not every hour reported! some are missing, e. g. 3, 6, 9 ...
+# For simplicity: Just assume value from previous hour. (might not always be correct,
+# but omitting roughly every third row would not be adequate in that setting)
+# "Forward filling"
+for(k in 1:nrow(weather_data_final)) {
+  if(is.na(weather_data_final$precip_type[k])) {
+    weather_data_final$precip_type[k] <- weather_data_final$precip_type[k - 1]
+  }
+}
+
+# Look how many still NA
+sum(is.na(weather_data_final$precip_type))
+
+# Snow cover: missing
+length(which(is.na(weather_data_final$snow_cover_cm)))
+summer_and_no_snow <- intersect(which(is.na(weather_data_final$snow_cover_cm)),
+          which(as.double(substr(weather_data_final$Date, 6, 7)) %in% 4:10)) 
+length(summer_and_no_snow)
+# For those days which are in summer and have NA for snow coverage -> Assume 0
+weather_data_final$snow_cover_cm[summer_and_no_snow] <- 0
+
+
+(colSums(is.na(weather_data_final)) / nrow(weather_data_final) * 100)  |> sort(decreasing = T)
+# After this: only moderate share of NAs in every column (max 0.3%), neglect this
+
+
+
+# Look whether data-specific NAs still exist and were not accounted for yet, 
+# encoded with i. a. -9, -999 or so -> NAs could still be encoded as negatives!
+# Check for every column how many are encoded with DWD-NA-codes
+colSums(weather_data_final == -9 | weather_data_final == -99 | weather_data_final == -999) |>  sort(decreasing = T)
+
+# Check at discrete variable outcomes
+table(weather_data_final$soilstate_7am)
+table(weather_data_final$type_precip)
+
+# Not-reporting of soil state could be season-related
+aggregate(weather_data_final$soilstate_7am == -9, by = list(substr(weather_data_final$Date, 6, 7)), FUN = sum)
+# It is not! Maybe year...
+aggregate(weather_data_final$soilstate_7am == -9, by = list(substr(weather_data_final$Date, 1, 4)), FUN = sum)
+
+# Visually:
+plot(weather_data_final$Date_Hour, ifelse(weather_data_final$soilstate_7am == -9, 1, 0))
+# Apparently, soil state not reported any more after 2020 not reported any more => what to do?
+
+# SAME check for type_precip...
+# Not-reporting could be season-related
+aggregate(weather_data_final$type_precip == -9, by = list(substr(weather_data_final$Date, 6, 7)), FUN = sum)
+# It is not! Maybe year...
+aggregate(weather_data_final$type_precip == -9, by = list(substr(weather_data_final$Date, 1, 4)), FUN = sum)
+
+plot(weather_data_final$Date_Hour, ifelse(weather_data_final$type_precip == -9, 1, 0))
+# Apparently, not reported any more after 2020 not reported any more => what to do?
+
+# DECISION TO TAKE: either drop, or subset on years which (first would be more reasonable) 
+# => NOTE: Final drop will be performed later
+
+
+
+# Plausibility checks again: mean of Bikes per weekdays
+aggregate(weather_data_final, Bikes_Counted ~ Weekday, mean)
+plot(aggregate(weather_data_final, air_temp ~ lubridate::month(weather_data_final$Date_Hour), mean))
+# Check whether general difference in bike traffic intensity across stations
+aggregate(weather_data_final, Bikes_Counted ~ Zählstelle, mean)
+
+
+
+
+
+
+# Check for perfect collinearity -> we need to avoid this
+weather_data_final |> dplyr::select(where(is.numeric)) |> na.omit() |> cor() |> 
+  heatmap(Rowv = NA, Colv = NA)
+
+
+
+
+
+
+# Aggregate all stations (check for differing availability, timespan when all are available)
+# Instead of running 5 different models or some station dummy, we will predict more on
+# the overall bike traffic in this district.
+# Therefore, we aggregate ALL stations for the point in time when ALL are available,
+# such that there are no skewed sums due to structural unavailabilities.
+mins <- c()
+for(station in unique(weather_data_final$Zählstelle)) {
+  newmin <- min((weather_data_final |> subset(Zählstelle == station))$Date_Hour)
+  mins <- mins |> c(newmin)
+}
+
+# Find the latest beginner
+max(mins)
+
+maxs <- c()
+for(station in unique(weather_data_final$Zählstelle)) {
+  newmax <- max((weather_data_final |> subset(Zählstelle == station))$Date_Hour)
+  maxs <- maxs |> c(newmax)
+}
+# Find the earliest drop-out station
+min(maxs)
+
+# Check how many stations available at every point in time
+table_availability <- aggregate(weather_data_final, Zählstelle ~ Date_Hour, FUN = function (x) length(unique(x)))
+
+# Find the Hours and Dates at which ALL STATIONS are available!
+allstationsavailable_time_hour <- table_availability$Date_Hour[which(table_availability$Zählstelle == max(table_availability$Zählstelle))]
+
+# Earliest and latest common date
+allstationsavailable_time_hour[1]; allstationsavailable_time_hour[length(allstationsavailable_time_hour)]
+
+# ONLY keep dates where all are available!
+weather_data_final <- weather_data_final[which(weather_data_final$Date_Hour %in% allstationsavailable_time_hour),]
+# roughly 50,000 obs lost... But still more than enough :)
+
+
+
+# NOW: split up again the data (because decision to sum up all stations was taken only at this point,
+# and we did not want to change again from the beginning with potential code problems after this change) 
+# into weather- and observational data, remerge it later.
+
+bikes_only <- weather_data_final[, c("Date_Hour", "Zählstelle", "Bikes_Counted")]
+weather_only <- weather_data_final[, c("Date_Hour", setdiff(colnames(weather_data_final), colnames(bikes_only)))]
+
+# Aggregate the bike traffic from all stations for every hour of common availability
+bikes_aggr <- aggregate(bikes_only, Bikes_Counted ~ Date_Hour, sum)
+# Drop duplicates -> every hour needs to be documented only once
+# All hourly data for one particular hour are redundant anyway
+weather_only <- unique(weather_only)
+
+# As expected, the remaining data of only the bikes and the deletion of the duplicate rows
+# in the weather data lead to the same data length.
+# We have ONE row for the weather at each date/hour combination,
+# and ONE row for the bike traffic at each.
+nrow(bikes_aggr) == nrow(weather_only)
+
+# We can prettily bring it together now.
+data_final_aggr <- merge(bikes_aggr, weather_only, by = "Date_Hour")
+
+
+
+# Decision on deletion of variables with little availability
+length(which(data_final_aggr$soilstate_7am == -9)) / nrow(data_final_aggr)
+length(which(data_final_aggr$type_precip == -9)) / nrow(data_final_aggr)
+# Very high unavailability... This is a problem.
+# Do these variables explain anything, looked at all alone?
+summary(lm(data_final_aggr, 
+           formula = Bikes_Counted ~ as.factor(soilstate_7am) + as.factor(type_precip))
+        )$r.squared
+
+# Either delete 38% of data or two variables which jointly explain 4% of variation?
+# More reasonable to delete those variables.
+data_final_aggr$soilstate_7am <- NULL
+data_final_aggr$type_precip <- NULL
+
+# How many NA left? Final check...
+nrow(data_final_aggr) - nrow(na.omit(data_final_aggr))
+sum(na.omit(data_final_aggr) == -9)
+# Only 436 lines will be deleted + no coded NAs any more.
+# This is good! Now we can just delete the NA rows and have a pretty fully available
+# dataset
+data_final_aggr <- data_final_aggr |> na.omit()
+
+# Delete useless info for final data set:
+colnames(data_final_aggr)
+# Can be re-constructed if needed later
+data_final_aggr$Date <- NULL
+
+
+# ====================================================================
+# Reformatting
+# ====================================================================
+
+# Now, we want to change the variables to their most common/understandable
+# units and assign them their most adequate type.
+
+#class(data_final_aggr$Holiday)
+
+# Visibility in km instead of m
+data_final_aggr$visibility <- data_final_aggr$visibility / 1000
+
+unique(data_final_aggr$precip_type)
+
+
+# Wind direction -- 8-fold separation instead of degree as numeric
+# We do not want 36 different dummies either
+unique(data_final_aggr$wind_degree) |> sort()
+wind_degr_dir <- data.frame(degr = seq(0, 360, by = 10))
+wind_degr_dir$dir <- c(rep("N", 3), 
+                       rep("NE", 4),
+                       rep("E", 5),
+                       rep("SE", 4),
+                       rep("S", 5),
+                       rep("SW", 4), 
+                       rep("W", 5),
+                       rep("NW", 4),
+                       rep("N", 3))
+# Assigns the right verbal description (e.g. NE = North-East and so on)
+winddir_assign <- array(wind_degr_dir$dir, dimnames = list(wind_degr_dir$degr))
+
+data_final_aggr$wind_dir <- winddir_assign[as.character(data_final_aggr$wind_degree)]
+# check if assignment successful:
+unique(data_final_aggr[, c("wind_dir", "wind_degree")])
+# Worked well
+data_final_aggr$wind_degree <- NULL
+data_final_aggr$wind_dir <- data_final_aggr$wind_dir |> as.factor()
+
+
+# precip_type
+class(data_final_aggr$precip_type) # needs to be treated as factor
+data_final_aggr$precip_type <- data_final_aggr$precip_type |> as.factor()
+
+# cloud_cover
+class(data_final_aggr$cloud_cover) # makes more sense in dummy interpretation
+data_final_aggr$cloud_cover <- data_final_aggr$cloud_cover |> as.factor()
+
+# hour dummy
+class(data_final_aggr$Hour) # also more sense as factor, because no linear trend throughout day
+data_final_aggr$Hour <- as.factor(data_final_aggr$Hour)
+
+# weekday
+class(data_final_aggr$Weekday) # transform to factor
+data_final_aggr$Weekday <- data_final_aggr$Weekday |> as.factor()
+
+# make holiday dummies factors as well
+data_final_aggr$Holiday <- data_final_aggr$Holiday |> as.factor()
+data_final_aggr$School_holidays <- data_final_aggr$School_holidays |> as.factor()
+
+# Two times sun cover: once on hourly base, and on daily base. check whether identical...
+aggregate(data_final_aggr, sunshine_dur_day ~ substr(Date_Hour, 1, 10), FUN = mean)
+aggregate(data_final_aggr, sunshine_duration ~ substr(Date_Hour, 1, 10), FUN = sum)
+c(min(data_final_aggr$sunshine_dur_day), max(data_final_aggr$sunshine_dur_day))
+unique(data_final_aggr$sunshine_dur_day) |> head(50)
+# no point in the second variable: delete ist
+data_final_aggr$sunshine_dur_day <- NULL
+
+# Plausability analysis for other sunshine duration
+sunsh_per_day <- aggregate(data_final_aggr, sunshine_duration ~ substr(Date_Hour, 1, 10), FUN = sum)
+plot(1:366, (aggregate(sunsh_per_day, sunshine_duration ~ substr(`substr(Date_Hour, 1, 10)`, 6, 10), max)[,2])/60)
+# YES, naturally limited seasonality pattern recognizable.
+
+# Inspect precip_type, because 2 is not specified in online source
+# cf. https://www.dwd.de/DE/leistungen/klimadatendeutschland/beschreibung_tagesmonatswerte.html
+# Tabelle NIEDERSCHLAGSHOEHE_IND (30 May 2025)
+plot(aggregate(data_final_aggr, precip_h_mm ~ precip_type, mean))
+table(data_final_aggr$precip_type) # code 2 unimportant, only 6 occ.
+
+# Check whether types are as needed:
+sapply(data_final_aggr, class)
+
+# Cloud cover still has negative value... is this na?
+unique(data_final_aggr$cloud_cover) |> sort() |> head(100)
+length(which(data_final_aggr$cloud_cover == -1))
+# cloud cover => inspect -1
+
+# Identify data as NA and clear df from them thereafter.
+data_final_aggr$cloud_cover[which(data_final_aggr$cloud_cover == -1)] <- NA
+data_final_aggr <- data_final_aggr |> na.omit()
+
+
+# Create dummies for months as well
+data_final_aggr$Month <- as.factor(substr(data_final_aggr$Date_Hour, 6, 7))
+
+
+# Recall once more: Not entire period has data available! 
+# This means there will be gaps of the model.
+plot(table_availability$Date_Hour, table_availability$Zählstelle,# type = 'l',
+     col = ifelse(table_availability$Zählstelle == 5, 'darkgreen', 'grey'),
+     main = "Data availability", sub = "For green dots, all 5 stations reported")
+
+
+
+
+
+
+
+# FINAL
+format(object.size(data_final_aggr), units = "MB") # check for size
+saveRDS(data_final_aggr, file = paste(wd, "data/final/data_final_bike_weather.RDS", sep = "/"))
+
+# CLEAR environment to continue with only the relevant data set
+rm(list = setdiff(ls(), "data_final_aggr"))
+
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# LM 
+
+## Simplistic model
+
+First lm analysis: Model on all variables in the Data set, except for Date_Hour
+```{r}
+lm_exp <- lm(data_final_aggr, formula = Bikes_Counted ~ . - Date_Hour)
+lm_exp |> summary()
+lm_exp_pred <- data.frame(Date = data_final_aggr$Date_Hour,
+                          Actual = data_final_aggr$Bikes_Counted,
+                          Pred = predict(lm_exp, data_final_aggr))
+
+# Note that negative predictions are possible
+min(lm_exp_pred$Pred)
+# any(grepl("2021-05", data_final_aggr$Date_Hour))
+# data_final_aggr[which(grepl("2021-05", data_final_aggr$Date_Hour)),]
+
+
+library(ggplot2)
+
+# Get some samples for plotting the model predictions
+set.seed(06124); samples <- sample(1:(nrow(lm_exp_pred) - 150), 20)
+
+for (i in 1:length(samples)) {
+  
+  plot <- ggplot(data = lm_exp_pred[samples[i]:(samples[i] + 150),], aes(x = Date, y = Actual), alpha = 0.7) + 
+    geom_line() +
+    geom_line(aes(y = Pred), color = "red")
+  
+  print(plot)
+}
+# Peaks are not so well identified
+# Overprediction in winter!
+```
+
+```{r}
+
+ggplot(data = lm_exp_pred, aes(x = Date, y = Actual), alpha = 0.7)  + geom_line()
+# Periods with data:
+# Note that when not all stations are available, then these dates are not in the sample
+# due to our decisions during aggregation. Only points in time that were green in the Data availability 
+# plot are included!
+
+```
+
+```{r}
+
+
+# Negative values still possible.
+# See how fit increases when negative values are all set to zero:
+lm_exp_pred$Pred[which(lm_exp_pred$Pred < 0)] <- 0
+new_rsq <- 1 - ( sum((lm_exp_pred$Pred - lm_exp_pred$Actual)**2) / sum((lm_exp_pred$Actual - mean(lm_exp_pred$Actual))**2) ); print(new_rsq) # only slightly better than before.
+
+
+
+```
+
+
+Now comes the time of feature engineering: Thinking about possible interaction terms, squares, logs, etc.
+```{r}
+# Find out dates with highest mispredictions to find out what might be relevant
+lm_exp_pred$eps_sq <- (lm_exp_pred$Actual - lm_exp_pred$Pred) ** 2
+lm_exp_pred$eps <- (lm_exp_pred$Actual - lm_exp_pred$Pred)
+lm_exp_pred$abs_error <- abs(lm_exp_pred$Actual - lm_exp_pred$Pred) 
+
+pred_error_tbl <- aggregate(lm_exp_pred, eps ~ substr(Date, 6, 10), FUN = mean)
+pred_error_tbl$`substr(Date, 6, 10)` <- as.Date(pred_error_tbl$`substr(Date, 6, 10)`, format = "%m-%d")
+colnames(pred_error_tbl)[1] <- "Date"
+plot(pred_error_tbl$Date, pred_error_tbl$eps, main = "Mean eps", sub = "Attention! Absolute eps can be misleading")
+```
+No clear seasonal misprediction pattern.
+
+### Interaction terms
+For finding out interesting combinations, I run an lm of `Bikes_Counted` on all possible combinations of two variables, each separately, first, and then add their interaction term. When the R² of the latter model is way higher, then this speaks for an important interaction term.
+```{r}
+
+# Create interaction terms
+
+colnames(data_final_aggr)
+
+# Which interaction terms have high explanatory power, all alone?
+dummy_results <- matrix(NA, ncol(data_final_aggr) - 1, ncol(data_final_aggr) - 1)
+
+# Create variable combinations to loop through
+colnames(dummy_results) <- colnames(data_final_aggr[-which(colnames(data_final_aggr) == "Bikes_Counted")])
+rownames(dummy_results) <- colnames(data_final_aggr[-which(colnames(data_final_aggr) == "Bikes_Counted")])
+
+
+for(var1 in rownames(dummy_results)) {
+  
+  for(var2 in colnames(dummy_results)) {
+    
+    if(var1 != var2) { # only for 2 different variables, exclude diagonal
+      # Look at increase of R² w.r.t. model without interaction term but only both vars
+      # This helps to evaluate how much additional power comes from the interaction term
+      formula1 <- as.formula(paste("Bikes_Counted ~ ", var1, " + ", var2, sep = ""))
+      formula2 <- as.formula(paste("Bikes_Counted ~ ", var1, " + ", var2, " + ", var1, ":", var2, sep = ""))
+      
+      rsq_1 <- summary(lm(data = data_final_aggr, formula = formula1))$r.squared
+      rsq_2 <- summary(lm(data = data_final_aggr, formula = formula2))$r.squared
+      
+      dummy_results[var1, var2] <- rsq_2 - rsq_1
+      
+    } else {
+      
+      dummy_results[var1, var2] <- NA
+      
+    }
+    
+  }
+  
+}
+
+# Inspect
+View(as.data.frame(dummy_results))
+
+heatmap(dummy_results, Rowv = NA, Colv = "Rowv")
+```
+
+```{r}
+# Store in format that is easier to use
+res_flat <- as.vector(dummy_results)
+
+# Get the names of the possible combinations
+names(res_flat) <- apply(expand.grid(rownames(dummy_results), colnames(dummy_results)), 1, paste, collapse = ":") 
+
+# Only rows 1, 3, ... needed -> always double occurrence because of symmetric matrix
+res_flat <- res_flat[seq(1, length(res_flat), 2)]
+
+# Find 50 highest increases of R²
+sort(res_flat, decreasing = TRUE)[1:50]
+
+# Only use 20 best
+twenty_best_interactions <- sort(res_flat, decreasing = TRUE)[1:20] |> names() |> 
+  paste(collapse = " + ")
+
+lm_exp$call
+
+# Prepare formula
+#paste(twenty_best_interactions, collapse = " + ")
+lm_exp_plus_interaction_formula = paste("Bikes_Counted ~ . + ", twenty_best_interactions, " - Date_Hour", sep = "") |> as.formula()
+
+# Train model
+lm_exp_plus_interaction <- lm(data = data_final_aggr,
+                              formula = lm_exp_plus_interaction_formula)
+
+summary(lm_exp_plus_interaction)$r.squared - summary(lm_exp)$r.squared
+# Strong increase! -> roughly 20 pct withb only 20 terms
+```
+
+### Further functional forms
+In the following, it might be interesting to look at other functional forms - in our case, quadratics and cubics. This will be done by running three models of Bikes_Counted on any explanatory variable
+
+(1) alone
+(2) alone + quadratics
+(3) alone + quadratics + cubics
+
+Then, again, I will check whether this brought about substantial improvements w. r. t. the baseline.
+
+```{r}
+# Other functional forms: squared?
+single_var_sq_results <- matrix(NA, nrow = nrow(dummy_results), ncol = 2)
+colnames(single_var_sq_results) <- c("Squares added: Diff. in R²", "Cubics added: Diff. in R²")
+rownames(single_var_sq_results) <- rownames(dummy_results)
+
+for(k in rownames(single_var_sq_results)) {
+  
+  if(is.numeric(data_final_aggr[[k]])){
+  
+  f1 <- as.formula(paste("Bikes_Counted ~ ", k, sep = ""))
+  f2 <- as.formula(paste("Bikes_Counted ~ ", k, " + I(", k, "**2)", sep = ""))
+  f3 <- as.formula(paste("Bikes_Counted ~ ", k, " + I(", k, "**2)", " + I(", k, "**3)", sep = ""))
+  
+  baseline_rsq <- summary(lm(data = data_final_aggr, formula = f1))$r.squared
+  squares_rsq <- summary(lm(data = data_final_aggr, formula = f2))$r.squared
+  cubics_rsq <- summary(lm(data = data_final_aggr, formula = f3))$r.squared
+  
+  # Increases in R² thanks to squares / quadratics
+  single_var_sq_results[k, 1] <- squares_rsq - baseline_rsq
+  single_var_sq_results[k, 2] <- cubics_rsq - baseline_rsq
+  }
+}
+
+single_var_sq_results <- single_var_sq_results |> na.omit()
+
+
+data_mat <- as.matrix(single_var_sq_results[order(single_var_sq_results[,1], decreasing = TRUE),])
+rownames_vec <- rownames(data_mat)
+cols <- c("blue", "red")
+
+# Plot these improvements in R²
+{
+matplot(data_mat, pch = 19, col = cols, xaxt = "n",
+        xlab = "Variable", ylab = "ΔR²", main = "R² - Increase through transformations")
+axis(1, at = 1:nrow(data_mat), labels = rownames_vec, las = 2, cex.axis = 0.5)
+
+legend("topright", legend = colnames(data_mat), col = cols, pch = 19)
+}
+```
+
+```{r}
+# useful:
+# wind_highest_last_h as **2, air_temp as **2 and **3, rel_humidity as **2, air_pressure as **2
+added_functional_forms <- paste("I(wind_highest_last_h ** 2) + I(air_temp ** 3) + I(air_temp ** 2) + I(rel_humidity ** 2) + I(air_pressure ** 2)")
+
+# Prepare formula as object, can be used later
+lm_exp_plus_interaction_functforms_formula <- paste(
+  paste(deparse(lm_exp_plus_interaction_formula), collapse = ""), " + ", 
+  added_functional_forms, sep = "") |> as.formula()
+
+lm_exp_plus_interaction_functforms <- lm(data = data_final_aggr,
+                              formula = lm_exp_plus_interaction_functforms_formula)
+
+summary(lm_exp_plus_interaction_functforms)$r.squared - summary(lm_exp)$r.squared
+# Only minimal increase in fit... given it's 5 additional variables
+summary(lm_exp_plus_interaction_functforms)$r.squared - summary(lm_exp_plus_interaction)$r.squared
+```
+
+Let's quickly visualize the predictions:
+```{r}
+predpower_comparison <- data.frame(
+  Date_Time = data_final_aggr$Date_Hour,
+  Actual = data_final_aggr$Bikes_Counted,
+  `LM_Baseline` = predict(lm_exp, data_final_aggr),
+  `LM_Interaction_terms` = predict(lm_exp_plus_interaction, data_final_aggr),
+  `LM_Interaction_terms_FunctForms` = predict(lm_exp_plus_interaction_functforms, data_final_aggr)
+  )
+
+# We want no negative predictions!
+predpower_comparison[predpower_comparison < 0] <- 0
+
+prettypal <- c('Actual' = 'darkgrey', 'LM Baseline' = "#e41a1c", 'LM + Interact.' = "#377eb8", 'LM + Interact. + Fct. Forms' = "#4daf4a")#, "#984ea3", "#ff7f00")
+
+
+
+ggplot(data = predpower_comparison, aes(x = Date_Time)) + 
+  geom_line(aes(y = Actual, color = "Actual")) + 
+  geom_line(aes(y = LM_Baseline, color = 'LM Baseline')) +
+  geom_line(aes(y = LM_Interaction_terms, color = 'LM + Interact.')) +
+  geom_line(aes(y = LM_Interaction_terms_FunctForms, color = 'LM + Interact. + Fct. Forms')) +
+  scale_color_manual(values = prettypal)
+
+```
+
+It is for sure more sensible to sample some periods:
+```{r}
+n_sample_periods <- 20
+length_sample_periods <- 100
+
+for(i in 1:n_sample_periods) {
+  subsample_startrow <- sample(1:(nrow(predpower_comparison) - length_sample_periods), 1)
+  subsample_endrow <- subsample_startrow + length_sample_periods
+  plotsample <- predpower_comparison[subsample_startrow:subsample_endrow,]
+  
+  plot <- ggplot(data = plotsample, aes(x = Date_Time)) + 
+  geom_line(aes(y = Actual, color = "Actual")) + 
+  geom_line(aes(y = LM_Baseline, color = 'LM Baseline')) +
+  geom_line(aes(y = LM_Interaction_terms, color = 'LM + Interact.')) +
+  geom_line(aes(y = LM_Interaction_terms_FunctForms, color = 'LM + Interact. + Fct. Forms')) +
+  scale_color_manual(values = prettypal)
+  
+  print(plot)
+  
+}
+
+
+
+```
+Is the partly very good explanatory power due to over-fitting or would it also on random testing data? Therefore, I am performing a **hold-out cross-validation with 80-20 training-testing split**.
+
+```{r}
+# Prepare function to get rid of negative predictions
+no_negative_predictions <- function(array) {array[which(array < 0)] <- 0; return(array)}
+
+# Prepare functions to get metrics quickly
+calc_rsq <- function(actual, predicted) {
+  SSR <- sum((actual - predicted) ** 2)
+  SST <- (sum((actual - mean(actual)) ** 2))
+  rsq <- 1 - SSR / SST
+  return(rsq)
+}
+
+calc_mae <- function(actual, predicted) {
+  mae <- mean(abs(actual - predicted))
+  return(mae)
+}
+  
+calc_rmse <- function(actual, predicted) {
+  rmse <- sqrt(mean((actual - predicted) ** 2))  
+  return(rmse)
+} 
+
+
+```
+
+## Cross-validation
+Note: The abbreviations mean:
+- `LM`: Baseline lm
+- `LM + IA`: `LM` + 20 most promising interaction terms
+- `LM + IA + FF`: `LM + IA` + 5 most promising functional forms
+
+```{r}
+set.seed(0345)
+iter_cv <- 5
+
+cv_res_matrix <- matrix(NA, nrow = iter_cv, ncol = (3 * 2 * 3)) # 3 models - 2 splits - 3 metrics
+
+models <- c("LM", "LM + IA", "LM + IA + FF")
+splits <- c("Train", "Test")
+metrics <- c("RMSE", "MAE", "R2")
+
+colnames(cv_res_matrix) <- paste(rep(models, each = 6), 
+                                 rep(rep(splits, each = 3), 3),
+                                 rep(metrics, 6),
+                                 sep = ", ")
+
+# Store cross-validation RMSE
+for(j in 1:iter_cv) {
+  
+  # Hold-out CV: always get 80% for training and 20% for testing
+  train_sample <- sample(1:nrow(data_final_aggr), floor(0.8 * nrow(data_final_aggr)))
+  
+  data_train <- data_final_aggr[train_sample,]
+  data_test <- data_final_aggr[- train_sample,]
+  
+  # Train data and find performance on training set
+  lm0 <- lm(formula = Bikes_Counted ~ . - Date_Hour, data = data_train)
+  lm1 <- lm(formula = lm_exp_plus_interaction_formula, data = data_train)
+  lm2 <- lm(formula = lm_exp_plus_interaction_functforms_formula, data = data_train)
+  
+  train_pred_0 <- predict(lm0, data_train) |> no_negative_predictions()
+  train_pred_1 <- predict(lm1, data_train) |> no_negative_predictions()
+  train_pred_2 <- predict(lm2, data_train) |> no_negative_predictions()
+  
+  # Predict on testing set as well
+  test_pred_0 <- predict(lm0, data_test) |> no_negative_predictions()
+  test_pred_1 <- predict(lm1, data_test) |> no_negative_predictions()
+  test_pred_2 <- predict(lm2, data_test) |> no_negative_predictions()
+
+  
+  cv_res_matrix[j, "LM, Train, RMSE"] <- calc_rmse(data_train$Bikes_Counted, train_pred_0)
+  cv_res_matrix[j, "LM, Train, MAE"] <- calc_mae(data_train$Bikes_Counted, train_pred_0)
+  cv_res_matrix[j, "LM, Train, R2"] <- calc_rsq(data_train$Bikes_Counted, train_pred_0)
+  cv_res_matrix[j, "LM, Test, RMSE"] <- calc_rmse(data_test$Bikes_Counted, test_pred_0)
+  cv_res_matrix[j, "LM, Test, MAE"] <- calc_mae(data_test$Bikes_Counted, test_pred_0)
+  cv_res_matrix[j, "LM, Test, R2"] <- calc_rsq(data_test$Bikes_Counted, test_pred_0)
+  
+  cv_res_matrix[j, "LM + IA, Train, RMSE"] <- calc_rmse(data_train$Bikes_Counted, train_pred_1)
+  cv_res_matrix[j, "LM + IA, Train, MAE"] <- calc_mae(data_train$Bikes_Counted, train_pred_1)
+  cv_res_matrix[j, "LM + IA, Train, R2"] <- calc_rsq(data_train$Bikes_Counted, train_pred_1)
+  cv_res_matrix[j, "LM + IA, Test, RMSE"] <- calc_rmse(data_test$Bikes_Counted, test_pred_1)
+  cv_res_matrix[j, "LM + IA, Test, MAE"] <- calc_mae(data_test$Bikes_Counted, test_pred_1)
+  cv_res_matrix[j, "LM + IA, Test, R2"] <- calc_rsq(data_test$Bikes_Counted, test_pred_1)
+  
+  cv_res_matrix[j, "LM + IA + FF, Train, RMSE"] <- calc_rmse(data_train$Bikes_Counted, train_pred_2)
+  cv_res_matrix[j, "LM + IA + FF, Train, MAE"] <- calc_mae(data_train$Bikes_Counted, train_pred_2)
+  cv_res_matrix[j, "LM + IA + FF, Train, R2"] <- calc_rsq(data_train$Bikes_Counted, train_pred_2)
+  cv_res_matrix[j, "LM + IA + FF, Test, RMSE"] <- calc_rmse(data_test$Bikes_Counted, test_pred_2)
+  cv_res_matrix[j, "LM + IA + FF, Test, MAE"] <- calc_mae(data_test$Bikes_Counted, test_pred_2)
+  cv_res_matrix[j, "LM + IA + FF, Test, R2"] <- calc_rsq(data_test$Bikes_Counted, test_pred_2)
+  
+  
+}
+
+print(cv_res_matrix |> as.data.frame())
+# cv_res_matrix |> as.data.frame() |> View()
+
+mean_of_all_iters <- apply(cv_res_matrix, 2, mean)
+```
+
+
+## Additional: Tweaking the lm
+
+**Note**: The following section shows some alternations of the linear model (time lags, aggregations of weather of pre-day), however, the most relevant are the models that were just run. These will also be the ones that need to be compared to the more advanced models.
+
+The actual performance of the models is better, if you will, because we can physically rule out negative bike traffic. Therefore, I get a measure which uses predictions without negative values (negative values replaced by 0):
+```{r}
+# Calculate new R-sq's with no negative predictions -> should have even higher accuracy.
+
+rsq_nonegative <- function(model) {
+  
+  actual_series <- model$model$Bikes_Counted
+  fitted_values_series <- model$fitted.values
+  
+  fitted_values_series[fitted_values_series < 0] <- 0
+  
+  RSS <- sum((actual_series - fitted_values_series) ** 2)
+  TSS <- sum((actual_series - mean(actual_series)) ** 2)
+  
+  rsq_nonegativepreds <- 1 - RSS / TSS
+  
+  return(rsq_nonegativepreds)
+  
+}
+
+# Note: Here, I check models which saw the entire dataset 
+
+lm_exp |> rsq_nonegative()
+summary(lm_exp)$r.squared
+
+lm_exp_plus_interaction |> rsq_nonegative()
+summary(lm_exp_plus_interaction)$r.squared
+
+lm_exp_plus_interaction_functforms |> rsq_nonegative()
+summary(lm_exp_plus_interaction_functforms)$r.squared
+```
+
+
+### Using time lags
+Now: Run an additional model: This one takes into account a selected number of time lags + all explanatory variables.
+```{r}
+
+# Define own function to repeat for different models and number of timelags
+lm_with_timelags <- function(dta, formula, timelags_to_add) {
+  
+  timeseries <- dta$Bikes_Counted
+  
+  for(nlag in 1:timelags_to_add) {
+    
+    name <- paste("Bikes_Counted_L", nlag, sep = "")
+    
+    raw_vec <- rep(NA, nrow(dta))
+    raw_vec[(nlag + 1)  : (length(raw_vec))] <- 
+      timeseries[1:(length(raw_vec) - nlag)]
+    
+    dta[[name]] <- raw_vec
+    
+  }
+  
+  dta <- dta |> na.omit()
+  formula <- as.formula(formula)
+  
+  lm_final <- lm(formula = formula, data = dta)
+  
+  return(lm_final)
+  
+}
+
+lm_exp_tl_1 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = Bikes_Counted ~ . - Date_Hour,
+                                timelags_to_add = 1)
+
+lm_exp_tl_6 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = Bikes_Counted ~ . - Date_Hour,
+                                timelags_to_add = 6)
+
+
+
+lm_exp_plus_interaction_tl_1 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = lm_exp_plus_interaction_formula,
+                                timelags_to_add = 1)
+
+lm_exp_plus_interaction_tl_6 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = lm_exp_plus_interaction_formula,
+                                timelags_to_add = 6)
+
+
+
+lm_exp_plus_interaction_functforms_tl_1 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = lm_exp_plus_interaction_functforms_formula,
+                                timelags_to_add = 1)
+
+lm_exp_plus_interaction_functforms_tl_6 <- lm_with_timelags(dta = data_final_aggr,
+                                formula = lm_exp_plus_interaction_functforms_formula,
+                                timelags_to_add = 6)
+
+# Make use of own pre-defined function for R² without negative predictions
+lm_exp_tl_1 |> rsq_nonegative()
+lm_exp_tl_6 |> rsq_nonegative()
+
+lm_exp_plus_interaction_tl_1 |> rsq_nonegative()
+lm_exp_plus_interaction_tl_6 |> rsq_nonegative()
+
+lm_exp_plus_interaction_functforms_tl_1 |> rsq_nonegative()
+lm_exp_plus_interaction_functforms_tl_6 |> rsq_nonegative()
+
+# Predictions of lm_exp_tl_6 - only roughly 1% worse with R² w.r.t. the model with 
+# all interaction terms, although far lower complexity
+# Prediction frame for visualization
+lm_exp_tl_6_preds <- data.frame(Date_Time = lm_exp_tl_6$model$Date_Hour,
+                                Actual = lm_exp_tl_6$model$Bikes_Counted,
+                                Predicted = lm_exp_tl_6$fitted.values)
+lm_exp_tl_6_preds$Predicted[lm_exp_tl_6_preds$Predicted < 0] <- 0
+```
+
+Now really the strongest effect of the explanatory power is from the timelags. This means, if we were to do forecasting for the next hour, our performance will be great in most cases.
+
+Again, I sample some parts of the predicted data and compare it with the actual values:
+
+```{r}
+
+n_sample_periods <- 20
+length_sample_periods <- 100
+
+for(i in 1:n_sample_periods) {
+  subsample_startrow <- sample(1:(nrow(lm_exp_tl_6_preds) - length_sample_periods), 1)
+  subsample_endrow <- subsample_startrow + length_sample_periods
+  plotsample <- lm_exp_tl_6_preds[subsample_startrow:subsample_endrow,]
+  
+  plot <- ggplot(data = plotsample, aes(x = Date_Time)) + 
+  geom_line(aes(y = Actual, color = "Actual")) + 
+  geom_line(aes(y = Predicted, color = 'Simple LM + 6 Timelags')) +
+  scale_color_manual(values = c("Actual" = prettypal[[2]], 
+                                "Simple LM + 6 Timelags" = prettypal[[4]]))
+  
+  print(plot)
+  
+}
+```
+There is a great fit for the very basic lm when 6 lags (= 6 previous hours) are added.
+
+
+
+
+### Prediction for next day 
+...with aggregated meteorological data of day before
+
+If there is any potential practical application case for such a project, e. g. for traffic management or gastronomical planning, then users might like to know at the beginning of the day already what the traffic will look like across the whole day.
+
+For that purpose, I will aggregate means/sums/maximums of meteorological data from the day before, and ex-ante known criteria such as the weekday, the month, and the hour.
+```{r}
+# Need mean
+daily_means <- aggregate(data_final_aggr,
+                         cbind(visibility, air_pressure, rel_humidity,
+                               air_temp, wind_speed, cloud_cover, snow_cover_cm) ~ 
+                           substr(Date_Hour, 1, 10),
+                         FUN = mean)
+
+# Need sum
+daily_sum <- aggregate(data_final_aggr,
+                         cbind(Bikes_Counted, sunshine_duration,
+                               precip_h_mm) ~ 
+                           substr(Date_Hour, 1, 10),
+                         FUN = sum)
+
+
+# Need max
+daily_max <- aggregate(data_final_aggr,
+                         cbind(wind_highest_last_h) ~ 
+                           substr(Date_Hour, 1, 10),
+                         FUN = max)
+
+
+colnames(daily_max)[1] <- "Date"
+colnames(daily_means)[1] <- "Date"
+colnames(daily_sum)[1] <- "Date"
+
+# Give meaningful prefixes
+colnames(daily_max)[2:ncol(daily_max)] <- paste0("max_", colnames(daily_max)[2:ncol(daily_max)])
+colnames(daily_means)[2:ncol(daily_means)] <- paste0("mean_", colnames(daily_means)[2:ncol(daily_means)])
+colnames(daily_sum)[2:ncol(daily_sum)] <- paste0("sum_", colnames(daily_sum)[2:ncol(daily_sum)])
+
+
+
+# Variables for which I can know the values ex-ante:
+data_nolag <- data_final_aggr[, c("Date_Hour", "Hour", "Weekday", "Holiday",
+                                  "School_holidays", "Month", "Bikes_Counted")]
+# Bring the different metrics together
+data_daily <- merge(daily_sum, merge(daily_max, daily_means, by = "Date"), by = "Date")
+
+data_daily$Date <- data_daily$Date |> as.Date()
+# Get the day for which the prediction is useful: The next day.
+# This will be the day where I merge it
+data_daily$onedaylater <- data_daily$Date + 1
+
+data_nolag$Date <- data_nolag$Date |> as.Date()
+
+# 1db = one day before. Merging brings together ex-ante known facts about the day plus
+# the meteorological aggregated data of the day before
+data_with_vals_1db <- merge(data_nolag, data_daily, by.x = "Date", by.y = "onedaylater",
+                            all.x = TRUE)
+data_with_vals_1db <- data_with_vals_1db[order(data_with_vals_1db$Date_Hour),]
+
+# Note: data from pre-day used from 1 AM on
+data_with_vals_1db <- data_with_vals_1db[data_with_vals_1db$Date_Hour >= "2016-01-27",]
+
+lm(data_with_vals_1db, formula = Bikes_Counted ~ . - Date - Date_Hour - `Date.y`) |>
+  summary()
+```
+
+The fit is only moderate w. r. t. previously fitted models. However, what happens if we account for interaction terms?
+
+Again, I check for the increase in the model fit in case I include the interaction term additionally to the two single variables.
+```{r}
+
+# Improve performance
+checkgrid <- t(combn(colnames(data_with_vals_1db), 2)) |> as.data.frame()
+colnames(checkgrid) <- c("var_a", "var_b")
+checkgrid$r_sq_increase <- NA
+# Don't need to check explained variable
+checkgrid <- checkgrid[-which(checkgrid$var_a == "Bikes_Counted" |
+                              checkgrid$var_b == "Bikes_Counted"),]
+# Don't want to use date variables
+checkgrid <- checkgrid[-which(grepl("Date", checkgrid$var_a) |
+                              grepl("Date", checkgrid$var_b)),]
+
+
+for(i in 1:nrow(checkgrid)) {
+  var1 <- checkgrid$var_a[i]
+  var2 <- checkgrid$var_b[i]
+  
+  f1 <- paste0("Bikes_Counted ~ ", var1, "+ ", var2) |> as.formula()
+  f2 <- paste0("Bikes_Counted ~ ", var1, "+ ", var2, " + ", var1, ":", var2) |> as.formula()
+    
+  m1 <- lm(data_with_vals_1db, formula = f1)
+  m2 <- lm(data_with_vals_1db, formula = f2)
+  
+  r_sq_increase <- summary(m2)$r.squared - summary(m1)$r.squared
+    
+  checkgrid$r_sq_increase[i] <- r_sq_increase
+  
+}
+
+
+# Keep only interactions which increase model performance by more than 1%
+View(checkgrid[order(checkgrid$r_sq_increase, decreasing = TRUE),])
+add_interactions_combis <- checkgrid[which(checkgrid$r_sq_increase > 0.01),]
+
+added_interactions <- paste(add_interactions_combis$var_a, add_interactions_combis$var_b, sep = ":") |>
+  paste(collapse = " + ")
+
+# Train model only on these interactions
+lm_dailylag_interactions <- lm(data_with_vals_1db,
+                               formula = as.formula(
+                                 paste("Bikes_Counted ~ . - Date - Date_Hour - `Date.y`", 
+                                       added_interactions, sep = " + ")))
+
+lm_dailylag_interactions |> rsq_nonegative()
+lm_exp_plus_interaction |> rsq_nonegative()
+
+
+```
+
+If we do not use the hourly data for weather to predict the bike traffic for exactly the same hour and instead rely on the means/maxs/sums of the day before and ex-ante known criteria of the points in time -- e. g. holiday, weekday, ... -- then we are not even 10% worse than in the model which has varying data on the hourly basis! This is quite impressive... But no big surprise, once we think about it.
+
+
+
+
+
+
+## Prepare common metrics for exports
+- **R²**. NOTE: The R² reported is the one that sets the negative predictions to zero. This uses the defined `rsq_nonegative()` function that was defined for the models.
+- **RMSE**. Root mean squared error.
+- **MAE**. Mean average error.
+```{r}
+# FUNCTION PREPARATION
+
+## R²
+# rsq_nonegative()
+
+## RMSE
+get_rmse <- function(model) {
+  rmse <- sqrt(mean((model$residuals) ** 2))
+  return(rmse)
+}
+
+## MAE
+get_mae <- function(model) {
+  mae <- mean(abs(model$residuals))
+  return(mae)
+}
+
+
+```
+
+
+```{r}
+model_list <- c(
+  "lm_exp",
+  "lm_exp_plus_interaction",
+  "lm_exp_plus_interaction_functforms",
+  "lm_exp_tl_1",
+  "lm_exp_tl_6",
+  "lm_exp_plus_interaction_tl_1",
+  "lm_exp_plus_interaction_tl_6",
+  "lm_exp_plus_interaction_functforms_tl_1",
+  "lm_exp_plus_interaction_functforms_tl_6",
+  "lm_dailylag_interactions"
+)
+
+metrics_df <- data.frame()
+# Model = model_list, 
+#                          MAE = grep(NA, length(model_list)), 
+#                          RMSE = grep(NA, length(model_list)), 
+#                          R2 = grep(NA, length(model_list)))
+
+for(m in model_list) {
+  
+  name <- m
+  model <- get(m)
+  
+  thisMAE <- model |> get_mae()
+  thisRMSE <- model |> get_rmse()
+  thisR2 <- model |> rsq_nonegative()
+  
+  entry <- data.frame(Model = name, MAE = thisMAE, RMSE = thisRMSE, R2 = thisR2)
+  metrics_df <- rbind(metrics_df, entry)
+  
+}
+```
+
+The time lag models and the data-of-the-day-before-model are not that bad, but for further comparison, the three relevant models are going to be the baseline model in its two variations with added interaction terms and functional forms.
+
+Note that the Cross-Validation results for those were already calculated:
+```{r}
+cv_res_inspection <- cv_res_matrix |> apply(2, mean) |> matrix(nrow = 3) |> t() # get mean of all iterations
+
+colnames(cv_res_inspection) <- c("RMSE", "MAE", "R2")
+rownames(cv_res_inspection) <- paste(rep(c("LM", "LM + IA", "LM + IA + FF"), each = 2),
+                                     rep(c("Train", "Test"), 3), sep = ": ")
+print(cv_res_inspection)
+```
+Hereby, I recall that the three relevant alternations of the linear model are not prone to overfitting, given the results of the hold-out cross validation with 5 iterations and 80 Train - 20 Test split.
+
+Prepare the necessary information for comparison with later models:
+```{r}
+metrics_eriks_models <- metrics_df[
+  which(metrics_df$Model %in% c("lm_exp", "lm_exp_plus_interaction",
+                                "lm_exp_plus_interaction_functforms")), ]
+
+metrics_eriks_models$MSE <- metrics_eriks_models$RMSE^2
+
+newmodelnames <- c("lm_exp" = "LM Baseline",
+                   "lm_exp_plus_interaction" = "LM + IA",
+                   "lm_exp_plus_interaction_functforms" = "LM + IA + FF")
+metrics_eriks_models$Model <- newmodelnames[metrics_eriks_models$Model]
+
+print(metrics_eriks_models)
+
+```
+
+
+## Descriptives of data set
+
+## Pull it over
+
+## Remaining descriptions
+
+
+
+
+
+
+
+
+
+
+
+
+# PCA
+```{r}
+# clean_data <- na.omit(weather_data_final) #Barbaric way to deal with NA, we could impute 
+# 
+# # Basic PCA
+# pca <- prcomp(clean_data[ , !(names(weather_data_final) %in% c("Bikes_Counted", "Date_Hour", "Date", "Zählstelle", "Weekday"))], scale. = TRUE)
+# 
+# 
+# # View results
+# summary(pca)       # Variance explained
+# pca$rotation       # Loadings
+# pca$x              # Principal components (scores)
+# 
+# # Scree plot
+# plot(pca, type = "l")
+
+# Biplot
+# biplot(pca) # Takes a long time to run, very crowded plot
+
+
+
+```
+
+
+
+
+
