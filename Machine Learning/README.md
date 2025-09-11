@@ -1,7 +1,3 @@
-Here’s a cleaned-up and structured **README.md** draft for your project:
-
----
-
 # Bike Traffic Prediction using Weather Data
 
 ## Project Overview
