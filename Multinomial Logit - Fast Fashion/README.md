@@ -7,7 +7,7 @@
 
 ## Overview
 
-This project investigates how consumers trade off price, sustainability, and store characteristics when choosing between fashion retailers. Using a Discrete Choice Experiment (DCE) survey of MLU students, a Multinomial Logit (MNL) model is estimated via the `apollo` package in R to quantify attribute importance and willingness to pay.
+This project investigates how consumers trade off price, sustainability, and store characteristics when choosing between fashion retailers. Using a Discrete Choice Experiment (DCE) survey, a Multinomial Logit (MNL) model is estimated via the `apollo` package in R to quantify attribute importance and willingness to pay.
 
 **Research Question:** How do consumers trade off price, sustainability, and store characteristics when choosing between fashion retailers, and how do individual characteristics influence store engagement relative to the opt-out?
 
