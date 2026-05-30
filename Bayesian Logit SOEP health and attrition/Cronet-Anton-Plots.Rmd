@@ -1,0 +1,910 @@
+---
+title: "Plots"
+output: html_document
+---
+
+
+```{r }
+# ==============================================================================
+# Attrition Analysis using d_analysis (all available data)
+# ==============================================================================
+
+cat("\n=== Attrition by Survey Year (syear) ===\n")
+
+# Calculate attrition rates by year
+attrition_by_year <- d_analysis %>%
+  filter(!is.na(attrition), !is.na(syear)) %>%
+  group_by(syear) %>%
+  summarise(
+    n_total = n(),
+    n_attrition = sum(attrition == 1),
+    attrition_rate = mean(attrition) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(syear_num = as.numeric(as.character(syear)))
+
+print(attrition_by_year, n = Inf)
+
+# Plot: Line chart over time
+p_year <- ggplot(attrition_by_year, aes(x = syear_num, y = attrition_rate)) +
+  geom_line(size = 1.5, color = "#E69F00") +
+  geom_point(size = 3, color = "#E69F00") +
+  labs(
+    title = "Attrition Rate by Year",
+    subtitle = "Attrition over time (excluding deaths and year 2023)",
+    x = "Survey Year",
+    y = "Attrition Rate (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_year)
+
+# ==============================================================================
+# Attrition by Sample with Year Gradient (HEATMAP)
+# ==============================================================================
+
+cat("\n=== Attrition by Sample with Year Gradient ===\n")
+
+# Calculate attrition by sample AND year for the gradient
+attrition_sample_year <- d_analysis %>%
+  filter(!is.na(attrition), !is.na(psample), !is.na(syear)) %>%
+  group_by(psample, syear) %>%
+  summarise(
+    n = n(),
+    n_attrition = sum(attrition == 1),
+    attrition_rate = mean(attrition) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(syear_num = as.numeric(as.character(syear)))
+
+# Calculate overall sample attrition for ordering
+sample_order <- attrition_sample_year %>%
+  group_by(psample) %>%
+  summarise(overall_rate = mean(attrition_rate), .groups = "drop") %>%
+  arrange(overall_rate)
+
+# Add ordering factor
+attrition_sample_year <- attrition_sample_year %>%
+  mutate(psample = factor(psample, levels = sample_order$psample))
+
+# Plot: Heatmap (sample x year)
+p_heatmap <- ggplot(attrition_sample_year, 
+                     aes(x = syear_num, y = psample, fill = attrition_rate)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_viridis_c(
+    name = "Attrition\nRate (%)",
+    option = "plasma",
+    direction = -1
+  ) +
+  labs(
+    title = "Attrition Rate by Sample Type and Year",
+    subtitle = "Heatmap: darker colors = higher attrition",
+    x = "Survey Year",
+    y = "Sample (psample)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+print(p_heatmap)
+```
+
+
+
+
+```{r }
+library(rstanarm)
+library(tidyverse)
+library(patchwork)
+
+# ==============================================================================
+# Setup: Complete cases and typical values
+# ==============================================================================
+
+cat("\n=== Generating Posterior Predictions ===\n")
+
+# Create complete case dataset
+d_complete <- d_analysis %>%
+  dplyr::filter(
+    !is.na(bmi_std), !is.na(grip_max), !is.na(attrition),
+    !is.na(pf_nbs), !is.na(rp_nbs), !is.na(bp_nbs), !is.na(gh_nbs),
+    !is.na(vt_nbs), !is.na(sf_nbs), !is.na(re_nbs), !is.na(mh_nbs),
+    !is.na(age), !is.na(female), !is.na(employed), 
+    !is.na(migback), !is.na(partner), !is.na(pgtatzeit), !is.na(pgbilzeit),
+    !is.na(pgmode), !is.na(psample), !is.na(syear)
+  )
+
+cat("Complete cases:", nrow(d_complete), "\n")
+
+# Get typical values
+typical_values <- list(
+  pf_nbs = median(d_complete$pf_nbs), rp_nbs = median(d_complete$rp_nbs),
+  bp_nbs = median(d_complete$bp_nbs), gh_nbs = median(d_complete$gh_nbs),
+  vt_nbs = median(d_complete$vt_nbs), sf_nbs = median(d_complete$sf_nbs),
+  re_nbs = median(d_complete$re_nbs), mh_nbs = median(d_complete$mh_nbs),
+  age = median(d_complete$age), grip_max = median(d_complete$grip_max),
+  pgtatzeit = median(d_complete$pgtatzeit), pgbilzeit = median(d_complete$pgbilzeit),
+  female = names(sort(table(d_complete$female), decreasing = TRUE))[1],
+  partner = as.numeric(names(sort(table(d_complete$partner), decreasing = TRUE))[1]),
+  employed = as.numeric(names(sort(table(d_complete$employed), decreasing = TRUE))[1]),
+  migback = as.numeric(names(sort(table(d_complete$migback), decreasing = TRUE))[1]),
+  pgmode = names(sort(table(d_complete$pgmode), decreasing = TRUE))[1],
+  psample = names(sort(table(d_complete$psample), decreasing = TRUE))[1],
+  syear = names(sort(table(d_complete$syear), decreasing = TRUE))[1]
+)
+
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
+
+create_pred_data <- function(var_values, var_name) {
+  # Create base dataframe with typical values
+  pred_data <- data.frame(typical_values, stringsAsFactors = FALSE)
+  pred_data <- pred_data[rep(1, length(var_values)), , drop = FALSE]
+  
+  # Set the focal variable
+  pred_data[[var_name]] <- var_values
+  
+  # Set bmi_std to 0 if not the focal variable
+  if(var_name != "bmi_std") {
+    pred_data$bmi_std <- 0
+  }
+  
+  # Set migback to 0 if not the focal variable
+  if(var_name != "migback") {
+    pred_data$migback <- 0
+  }
+  
+  # Convert factors
+  pred_data$female <- factor(pred_data$female, levels = levels(d_complete$female))
+  pred_data$pgmode <- factor(pred_data$pgmode, levels = levels(factor(d_complete$pgmode)))
+  pred_data$psample <- factor(pred_data$psample, levels = levels(factor(d_complete$psample)))
+  pred_data$syear <- factor(pred_data$syear, levels = levels(factor(d_complete$syear)))
+  
+  return(pred_data)
+}
+
+summarize_predictions <- function(pp) {
+  data.frame(
+    Mean_Prob = colMeans(pp),
+    SD = apply(pp, 2, sd),
+    CI_Lower = apply(pp, 2, quantile, probs = 0.025),
+    CI_Upper = apply(pp, 2, quantile, probs = 0.975)
+  )
+}
+
+# ==============================================================================
+# Categorical Variables (Binary & Multi-level)
+# ==============================================================================
+
+plot_categorical <- function(var_name, var_labels, plot_title, subtitle, color = "steelblue") {
+  cat(sprintf("\n--- %s Effect ---\n", var_name))
+  
+  var_values <- if(var_name == "pgmode") {
+    sort(unique(d_complete[[var_name]]))
+  } else {
+    c(0, 1)
+  }
+  
+  # Special handling for pgmode to avoid replication issues
+  if(var_name == "pgmode") {
+    pred_data <- data.frame(
+      pgmode = var_values,
+      bmi_std = 0,
+      grip_max = typical_values$grip_max,
+      employed = typical_values$employed,
+      migback = 0,
+      pgtatzeit = typical_values$pgtatzeit,
+      pgbilzeit = typical_values$pgbilzeit,
+      pf_nbs = typical_values$pf_nbs,
+      rp_nbs = typical_values$rp_nbs,
+      bp_nbs = typical_values$bp_nbs,
+      gh_nbs = typical_values$gh_nbs,
+      vt_nbs = typical_values$vt_nbs,
+      sf_nbs = typical_values$sf_nbs,
+      re_nbs = typical_values$re_nbs,
+      mh_nbs = typical_values$mh_nbs,
+      age = typical_values$age,
+      female = typical_values$female,
+      partner = typical_values$partner,
+      psample = typical_values$psample,
+      syear = typical_values$syear,
+      stringsAsFactors = FALSE
+    )
+    
+    # Convert factors
+    pred_data$female <- factor(pred_data$female, levels = levels(d_complete$female))
+    pred_data$pgmode <- factor(pred_data$pgmode, levels = levels(factor(d_complete$pgmode)))
+    pred_data$psample <- factor(pred_data$psample, levels = levels(factor(d_complete$psample)))
+    pred_data$syear <- factor(pred_data$syear, levels = levels(factor(d_complete$syear)))
+  } else {
+    pred_data <- create_pred_data(var_values, var_name)
+  }
+  
+  pp <- posterior_epred(model4_bayes, newdata = pred_data)
+  summary_df <- summarize_predictions(pp)
+  summary_df$Category <- var_labels
+  
+  cat("\nPredicted Attrition Probability:\n")
+  print(summary_df, digits = 3)
+  
+  if(length(var_values) == 2) {
+    diff <- pp[, 2] - pp[, 1]
+    cat(sprintf("\nDifference: %.1f pp (95%% CI: %.1f to %.1f)\n",
+                mean(diff) * 100, quantile(diff, 0.025) * 100, quantile(diff, 0.975) * 100))
+  }
+  
+  # Use reorder for multi-level categorical variables
+  if(length(var_values) > 2) {
+    p <- ggplot(summary_df, aes(x = reorder(Category, Mean_Prob), y = Mean_Prob * 100)) +
+      geom_col(fill = color, alpha = 0.7) +
+      geom_errorbar(aes(ymin = CI_Lower * 100, ymax = CI_Upper * 100), width = 0.2) +
+      labs(title = plot_title, subtitle = subtitle,
+           y = "Attrition Probability (%)", x = "") +
+      theme_minimal(base_size = 14) +
+      theme(
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 13)
+      ) +
+      coord_flip()
+  } else {
+    p <- ggplot(summary_df, aes(x = Category, y = Mean_Prob * 100)) +
+      geom_col(fill = color, alpha = 0.7) +
+      geom_errorbar(aes(ymin = CI_Lower * 100, ymax = CI_Upper * 100), width = 0.2) +
+      labs(title = plot_title, subtitle = subtitle,
+           y = "Attrition Probability (%)", x = "") +
+      theme_minimal(base_size = 14) +
+      theme(
+        axis.title = element_text(size = 15),
+        axis.text = element_text(size = 13)
+      )
+  }
+  
+  print(p)
+  
+  invisible(list(plot = p, summary = summary_df))
+}
+
+# Plot categorical variables
+plot_categorical("migback", c("No", "Yes"), 
+                "Predicted Attrition by Migration Background",
+                "All other variables at typical values")
+
+plot_categorical("employed", c("Unemployed", "Employed"),
+                "Predicted Attrition by Employment Status",
+                "Employed individuals less likely to attrit", "coral")
+
+plot_categorical("pgmode", sort(unique(d_complete$pgmode)),
+                "Predicted Attrition by Interview Mode",
+                "Different survey modes have varying attrition rates", "tomato")
+
+# ==============================================================================
+# Continuous Variables (Ribbon Plots)
+# ==============================================================================
+
+plot_continuous <- function(var_name, x_label, plot_title, subtitle, color = "steelblue", 
+                           quantile_range = NULL, full_range = FALSE) {
+  cat(sprintf("\n--- %s Effect ---\n", var_name))
+  
+  if(!is.null(quantile_range)) {
+    var_range <- seq(quantile(d_complete[[var_name]], quantile_range[1], na.rm = TRUE),
+                    quantile(d_complete[[var_name]], quantile_range[2], na.rm = TRUE),
+                    length.out = 50)
+  } else if(full_range) {
+    var_range <- seq(min(d_complete[[var_name]], na.rm = TRUE),
+                    max(d_complete[[var_name]], na.rm = TRUE),
+                    length.out = 50)
+  } else {
+    var_range <- seq(-2, 2, length.out = 50)  # For standardized vars
+  }
+  
+  pred_data <- create_pred_data(var_range, var_name)
+  pp <- posterior_epred(model4_bayes, newdata = pred_data)
+  summary_df <- summarize_predictions(pp)
+  summary_df$X <- var_range
+  
+  p <- ggplot(summary_df, aes(x = X, y = Mean_Prob * 100)) +
+    geom_ribbon(aes(ymin = CI_Lower * 100, ymax = CI_Upper * 100), 
+                fill = color, alpha = 0.3) +
+    geom_line(color = color, size = 1.2) +
+    labs(title = plot_title, subtitle = subtitle,
+         y = "Attrition Probability (%)", x = x_label) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 13)
+    )
+  
+  print(p)
+  invisible(list(plot = p, summary = summary_df))
+}
+
+# Plot continuous variables
+plot_continuous("bmi_std", "BMI (standardized)", 
+               "Predicted Attrition by BMI",
+               "Higher BMI → Lower attrition (protective effect)")
+
+plot_continuous("grip_max", "Maximum Grip Strength (kg)",
+               "Predicted Attrition by Grip Strength",
+               "Higher grip strength → Lower attrition", "darkgreen",
+               quantile_range = c(0.05, 0.95))
+
+plot_continuous("age", "Age (years)",
+               "Predicted Attrition by Age",
+               "Older age → Higher attrition risk", "#E69F00", 
+               full_range = TRUE)
+
+plot_continuous("pgtatzeit", "Actual Work Hours per Week",
+               "Predicted Attrition by Weekly Work Hours",
+               "More Work per Week → Lower attrition", "purple", 
+               full_range = TRUE)
+
+plot_continuous("pgbilzeit", "Years of Education",
+               "Predicted Attrition by Education",
+               "More education → Lower attrition", "#cb94f7", 
+               full_range = TRUE)
+
+# ==============================================================================
+# SF-12 Health Subscales (Horizontal Bar Plot)
+# ==============================================================================
+
+cat("\n--- SF-12 Health Subscales Effect ---\n")
+
+health_vars <- c("pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs", 
+                 "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs")
+health_labels <- c("Physical Functioning", "Role Physical", "Bodily Pain", 
+                   "General Health", "Vitality", "Social Functioning",
+                   "Role Emotional", "Mental Health")
+
+health_results <- map2_dfr(health_vars, health_labels, function(var, label) {
+  low_val <- quantile(d_complete[[var]], 0.25, na.rm = TRUE)
+  high_val <- quantile(d_complete[[var]], 0.75, na.rm = TRUE)
+  
+  pred_low <- create_pred_data(low_val, var)
+  pred_high <- create_pred_data(high_val, var)
+  
+  pp_low <- posterior_epred(model4_bayes, newdata = pred_low)
+  pp_high <- posterior_epred(model4_bayes, newdata = pred_high)
+  diff <- pp_high - pp_low
+  
+  data.frame(
+    Variable = label,
+    Diff = mean(diff) * 100,
+    CI_Lower = quantile(diff, 0.025) * 100,
+    CI_Upper = quantile(diff, 0.975) * 100,
+    stringsAsFactors = FALSE
+  )
+})
+
+cat("\nHealth Subscale Effects (75th vs 25th percentile):\n")
+print(health_results, digits = 2)
+
+plot_health <- ggplot(health_results, aes(x = reorder(Variable, Diff), y = Diff)) +
+  geom_col(fill = "#56B4E9", alpha = 0.7) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  coord_flip() +
+  labs(title = "SF-12 Health Subscales Effect on Attrition",
+       subtitle = "Change from 25th to 75th percentile",
+       y = "Change in Attrition Probability (percentage points)", x = "") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13)
+  )
+
+print(plot_health)
+
+# ==============================================================================
+# Gender Effect (Female vs Male)
+# ==============================================================================
+
+
+cat("\n--- Female Effect ---\n")
+
+# Get the actual factor levels for female
+female_levels <- levels(d_complete$female)
+
+# Create prediction data manually
+pred_data <- data.frame(
+  female = factor(female_levels, levels = female_levels),
+  bmi_std = 0,
+  grip_max = typical_values$grip_max,
+  employed = typical_values$employed,
+  migback = 0,
+  pgtatzeit = typical_values$pgtatzeit,
+  pgbilzeit = typical_values$pgbilzeit,
+  pf_nbs = typical_values$pf_nbs,
+  rp_nbs = typical_values$rp_nbs,
+  bp_nbs = typical_values$bp_nbs,
+  gh_nbs = typical_values$gh_nbs,
+  vt_nbs = typical_values$vt_nbs,
+  sf_nbs = typical_values$sf_nbs,
+  re_nbs = typical_values$re_nbs,
+  mh_nbs = typical_values$mh_nbs,
+  age = typical_values$age,
+  partner = typical_values$partner,
+  pgmode = factor(typical_values$pgmode, levels = levels(factor(d_complete$pgmode))),
+  psample = factor(typical_values$psample, levels = levels(factor(d_complete$psample))),
+  syear = factor(typical_values$syear, levels = levels(factor(d_complete$syear))),
+  stringsAsFactors = FALSE
+)
+
+pp <- posterior_epred(model4_bayes, newdata = pred_data)
+summary_df <- summarize_predictions(pp)
+summary_df$Category <- c("Male", "Female")
+
+cat("\nPredicted Attrition Probability:\n")
+print(summary_df, digits = 3)
+
+diff <- pp[, 2] - pp[, 1]
+cat(sprintf("\nDifference (Female - Male): %.1f pp (95%% CI: %.1f to %.1f)\n",
+            mean(diff) * 100, quantile(diff, 0.025) * 100, quantile(diff, 0.975) * 100))
+
+plot_female <- ggplot(summary_df, aes(x = Category, y = Mean_Prob * 100)) +
+  geom_col(fill = "coral", alpha = 0.7) +
+  geom_errorbar(aes(ymin = CI_Lower * 100, ymax = CI_Upper * 100), width = 0.2) +
+  labs(title = "Predicted Attrition by Gender",
+       subtitle = "All other variables at typical values",
+       y = "Attrition Probability (%)", x = "") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13)
+  )
+
+print(plot_female)
+```
+
+
+
+
+```{r }
+# ==============================================================================
+# SF-12 Health Variables - Ribbon Plots
+# ==============================================================================
+cat("\n=== SF-12 Health Variables: Ribbon Plots ===\n")
+health_vars <- c("pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs", 
+                 "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs")
+health_labels <- c("Physical Functioning", "Role Physical", "Bodily Pain", 
+                   "General Health", "Vitality", "Social Functioning",
+                   "Role Emotional", "Mental Health")
+# Function to create ribbon plot for health variables
+plot_health_ribbon <- function(var_name, var_label, color = "coral") {
+  cat(sprintf("\n--- %s Effect ---\n", var_label))
+  
+  # full, can be tweaked 
+  var_range <- seq(quantile(d_complete[[var_name]], 0, na.rm = TRUE),
+                   quantile(d_complete[[var_name]], 1, na.rm = TRUE),
+                   length.out = 50)
+  
+  pred_data <- create_pred_data(var_range, var_name)
+  pp <- posterior_epred(model4_bayes, newdata = pred_data)
+  summary_df <- summarize_predictions(pp)
+  summary_df$X <- var_range
+  
+  # Calculate range of predictions for subtitle
+  pred_range <- range(summary_df$Mean_Prob * 100)
+  range_text <- sprintf("Prediction range: %.1f%% - %.1f%%", pred_range[1], pred_range[2])
+  
+  p <- ggplot(summary_df, aes(x = X, y = Mean_Prob * 100)) +
+    geom_ribbon(aes(ymin = CI_Lower * 100, ymax = CI_Upper * 100), 
+                fill = color, alpha = 0.3) +
+    geom_line(color = color, size = 1.2) +
+    labs(title = paste("Predicted Attrition by", var_label),
+         subtitle = range_text,
+         y = "Attrition Probability (%)", 
+         x = paste(var_label, "(norm-based score)")) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 13)
+    )
+  
+  print(p)
+  
+  # Print summary
+  cat(sprintf("Range: %.1f to %.1f\n", min(var_range), max(var_range)))
+  cat(sprintf("Prediction range: %.1f%% to %.1f%%\n", pred_range[1], pred_range[2]))
+  cat(sprintf("Total change: %.2f percentage points\n", pred_range[2] - pred_range[1]))
+  
+  invisible(list(plot = p, summary = summary_df))
+}
+# Create ribbon plots for all health variables
+health_ribbon_plots <- map2(health_vars, health_labels, function(var, label) {
+  plot_health_ribbon(var, label)
+})
+# Optional: Create a summary comparison showing the slope/change for each variable
+health_slopes <- map2_dfr(health_vars, health_labels, function(var, label) {
+  var_range <- seq(quantile(d_complete[[var]], 0.05, na.rm = TRUE),
+                   quantile(d_complete[[var]], 0.95, na.rm = TRUE),
+                   length.out = 50)
+  
+  pred_data <- create_pred_data(var_range, var_name = var)
+  pp <- posterior_epred(model4_bayes, newdata = pred_data)
+  
+  # Calculate change from lowest to highest
+  change <- (pp[, 50] - pp[, 1]) * 100  # percentage points
+  
+  data.frame(
+    Variable = label,
+    Mean_Change = mean(change),
+    CI_Lower = quantile(change, 0.025),
+    CI_Upper = quantile(change, 0.975),
+    Significant = !(quantile(change, 0.025) < 0 & quantile(change, 0.975) > 0)
+  )
+})
+cat("\n=== Summary: Change from 5th to 95th Percentile ===\n")
+print(health_slopes %>% arrange(desc(abs(Mean_Change))), digits = 2)
+# Plot the summary
+ggplot(health_slopes, aes(x = reorder(Variable, Mean_Change), y = Mean_Change)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_pointrange(aes(ymin = CI_Lower, ymax = CI_Upper,
+                      color = Significant), 
+                  size = 0.8, fatten = 3) +
+  scale_color_manual(values = c("grey60", "coral")) +
+  coord_flip() +
+  labs(title = "SF-12 Health Variables: Effect Sizes",
+       subtitle = "Change in attrition from 5th to 95th percentile (95% CrI)",
+       x = "",
+       y = "Change in Attrition Probability (percentage points)") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13)
+  )
+```
+
+
+
+
+```{r }
+# ==============================================================================
+# Mental Health Effect by Interview Mode 
+# ==============================================================================
+
+library(rstanarm)
+library(tidyverse)
+
+cat("\n=== Mental Health × Interview Mode Interaction ===\n")
+
+# Get all interview modes
+interview_modes <- sort(unique(d_complete$pgmode))
+cat("Interview modes:", paste(interview_modes, collapse = ", "), "\n")
+
+# Mental health range (5th to 95th percentile)
+mh_range <- seq(quantile(d_complete$mh_nbs, 0.05, na.rm = TRUE),
+                quantile(d_complete$mh_nbs, 0.95, na.rm = TRUE),
+                length.out = 50)
+
+# Generate predictions for each mode
+mode_predictions <- map_dfr(interview_modes, function(mode) {
+  cat(sprintf("\nProcessing mode: %s\n", mode))
+  
+  # Create prediction data for this mode
+  pred_data <- data.frame(
+    mh_nbs = mh_range,
+    pgmode = mode,
+    bmi_std = 0,
+    grip_max = typical_values$grip_max,
+    employed = typical_values$employed,
+    migback = 0,
+    pgtatzeit = typical_values$pgtatzeit,
+    pgbilzeit = typical_values$pgbilzeit,
+    pf_nbs = typical_values$pf_nbs,
+    rp_nbs = typical_values$rp_nbs,
+    bp_nbs = typical_values$bp_nbs,
+    gh_nbs = typical_values$gh_nbs,
+    vt_nbs = typical_values$vt_nbs,
+    sf_nbs = typical_values$sf_nbs,
+    re_nbs = typical_values$re_nbs,
+    age = typical_values$age,
+    female = typical_values$female,
+    partner = typical_values$partner,
+    psample = typical_values$psample,
+    syear = typical_values$syear,
+    stringsAsFactors = FALSE
+  )
+  
+  # Convert factors
+  pred_data$female <- factor(pred_data$female, levels = levels(d_complete$female))
+  pred_data$pgmode <- factor(pred_data$pgmode, levels = levels(factor(d_complete$pgmode)))
+  pred_data$psample <- factor(pred_data$psample, levels = levels(factor(d_complete$psample)))
+  pred_data$syear <- factor(pred_data$syear, levels = levels(factor(d_complete$syear)))
+  
+  # Get predictions
+  pp <- posterior_epred(model4_bayes, newdata = pred_data)
+  
+  # Summarize
+  data.frame(
+    Mode = mode,
+    MH_Score = mh_range,
+    Mean_Prob = colMeans(pp) * 100,
+    CI_Lower = apply(pp, 2, quantile, probs = 0.025) * 100,
+    CI_Upper = apply(pp, 2, quantile, probs = 0.975) * 100
+  )
+})
+
+# Print summary statistics by mode
+cat("\n=== Summary by Mode ===\n")
+mode_summary <- mode_predictions %>%
+  group_by(Mode) %>%
+  dplyr::summarize(
+    Max_Prob = max(Mean_Prob),
+    Min_Prob = min(Mean_Prob),
+    Range = Max_Prob - Min_Prob,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Max_Prob))
+
+print(mode_summary, digits = 2)
+
+# Calculate average attrition rate by interview mode
+mode_attrition <- d_complete %>%
+  group_by(pgmode) %>%
+  dplyr::summarize(
+    Avg_Attrition = mean(attrition, na.rm = TRUE) * 100,
+    N = n(),
+    .groups = "drop"
+  )
+
+cat("\n=== Average Attrition by Interview Mode ===\n")
+print(mode_attrition, digits = 2)
+
+# Create individual plots for each mode
+cat("\n=== Creating Individual Plots for Each Mode ===\n")
+
+for(mode in interview_modes) {
+  mode_data <- mode_predictions %>% filter(Mode == mode)
+  mode_avg <- mode_attrition %>% filter(pgmode == mode) %>% pull(Avg_Attrition)
+  
+  # Calculate range of effect for this mode
+  effect_range <- max(mode_data$Mean_Prob) - min(mode_data$Mean_Prob)
+  
+  p <- ggplot(mode_data, aes(x = MH_Score, y = Mean_Prob)) +
+    geom_hline(yintercept = mode_avg, linetype = "dashed", 
+               color = "red", linewidth = 0.8) +
+    geom_ribbon(aes(ymin = CI_Lower, ymax = CI_Upper), 
+                fill = "#56B4E9", alpha = 0.3) +
+    geom_line(color = "#56B4E9", linewidth = 1.2) +
+    coord_cartesian(ylim = c(0, 20)) +
+    labs(
+      title = paste("Mental Health Effect on Attrition -", mode),
+      subtitle = sprintf("95%% credible intervals | Mode avg = %.1f%% | Effect range = %.1f%%", 
+                        mode_avg, effect_range),
+      x = "Mental Health Score (MH - norm-based)",
+      y = "Attrition Probability (%)"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 13)
+    )
+  
+  print(p)
+  cat("\n")
+}
+
+cat("\n=== Analysis Complete ===\n")
+cat("Individual plot created for each interview mode\n")
+cat("All plots use same y-axis (0-20%) for direct comparison\n")
+cat("Red dashed line shows average attrition for that specific interview mode\n")
+
+```
+
+
+
+```{r}
+# ==============================================================================
+# Mental Health Effect Range by Interview Mode
+# ==============================================================================
+
+cat("\n=== Mental Health Effect Range by Interview Mode ===\n")
+
+# Get all interview modes
+interview_modes <- sort(unique(d_complete$pgmode))
+
+# Mental health range (0th to 100th percentile) - FULL RANGE
+mh_low <- quantile(d_complete$mh_nbs, 0, na.rm = TRUE)
+mh_high <- quantile(d_complete$mh_nbs, 1, na.rm = TRUE)
+
+# Calculate effect range for each interview mode
+mode_effects <- map_dfr(interview_modes, function(mode) {
+  cat(sprintf("\nProcessing mode: %s\n", mode))
+  
+  # Create prediction data for LOW mental health
+  pred_low <- data.frame(
+    mh_nbs = mh_low,
+    pgmode = mode,
+    bmi_std = 0,
+    grip_max = typical_values$grip_max,
+    employed = typical_values$employed,
+    migback = 0,
+    pgtatzeit = typical_values$pgtatzeit,
+    pgbilzeit = typical_values$pgbilzeit,
+    pf_nbs = typical_values$pf_nbs,
+    rp_nbs = typical_values$rp_nbs,
+    bp_nbs = typical_values$bp_nbs,
+    gh_nbs = typical_values$gh_nbs,
+    vt_nbs = typical_values$vt_nbs,
+    sf_nbs = typical_values$sf_nbs,
+    re_nbs = typical_values$re_nbs,
+    age = typical_values$age,
+    female = typical_values$female,
+    partner = typical_values$partner,
+    psample = typical_values$psample,
+    syear = typical_values$syear,
+    stringsAsFactors = FALSE
+  )
+  
+  # Create prediction data for HIGH mental health
+  pred_high <- data.frame(
+    mh_nbs = mh_high,
+    pgmode = mode,
+    bmi_std = 0,
+    grip_max = typical_values$grip_max,
+    employed = typical_values$employed,
+    migback = 0,
+    pgtatzeit = typical_values$pgtatzeit,
+    pgbilzeit = typical_values$pgbilzeit,
+    pf_nbs = typical_values$pf_nbs,
+    rp_nbs = typical_values$rp_nbs,
+    bp_nbs = typical_values$bp_nbs,
+    gh_nbs = typical_values$gh_nbs,
+    vt_nbs = typical_values$vt_nbs,
+    sf_nbs = typical_values$sf_nbs,
+    re_nbs = typical_values$re_nbs,
+    age = typical_values$age,
+    female = typical_values$female,
+    partner = typical_values$partner,
+    psample = typical_values$psample,
+    syear = typical_values$syear,
+    stringsAsFactors = FALSE
+  )
+  
+  # Convert factors
+  pred_low$female <- factor(pred_low$female, levels = levels(d_complete$female))
+  pred_low$pgmode <- factor(pred_low$pgmode, levels = levels(factor(d_complete$pgmode)))
+  pred_low$psample <- factor(pred_low$psample, levels = levels(factor(d_complete$psample)))
+  pred_low$syear <- factor(pred_low$syear, levels = levels(factor(d_complete$syear)))
+  
+  pred_high$female <- factor(pred_high$female, levels = levels(d_complete$female))
+  pred_high$pgmode <- factor(pred_high$pgmode, levels = levels(factor(d_complete$pgmode)))
+  pred_high$psample <- factor(pred_high$psample, levels = levels(factor(d_complete$psample)))
+  pred_high$syear <- factor(pred_high$syear, levels = levels(factor(d_complete$syear)))
+  
+  # Get predictions
+  pp_low <- posterior_epred(model4_bayes, newdata = pred_low)
+  pp_high <- posterior_epred(model4_bayes, newdata = pred_high)
+  
+  # Calculate difference (effect of going from low to high MH)
+  diff <- (pp_high - pp_low) * 100  # percentage points
+  
+  data.frame(
+    Mode = mode,
+    MH_Effect = mean(diff),
+    CI_Lower = quantile(diff, 0.025),
+    CI_Upper = quantile(diff, 0.975),
+    Prob_Low = mean(pp_low) * 100,
+    Prob_High = mean(pp_high) * 100
+  )
+})
+
+cat("\n=== Mental Health Effect by Interview Mode ===\n")
+cat(sprintf("Mental Health range: %.1f (min) to %.1f (max)\n", mh_low, mh_high))
+print(mode_effects, digits = 2)
+
+# Create the plot - FLIPPED ORDER (reverse the reorder)
+plot_mh_mode <- ggplot(mode_effects, aes(x = reorder(Mode, -MH_Effect), y = MH_Effect)) +
+  geom_col(fill = "#56B4E9", alpha = 0.7) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  coord_flip() +
+  labs(
+    title = "Mental Health Effect Range by Interview Mode",
+    y = "Change in Attrition Probability (percentage points)",
+    x = "Interview Mode"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13),
+    plot.title = element_text(face = "bold")
+  )
+
+print(plot_mh_mode)
+
+
+
+cat("\n=== Interpretation ===\n")
+cat("The first plot shows the EFFECT SIZE of mental health for each interview mode\n")
+cat("  - Negative values = better mental health reduces attrition\n")
+cat("  - Larger absolute values = stronger mental health effect\n\n")
+
+
+```
+
+
+
+
+```{r }
+# ==============================================================================
+# Interview Mode Distribution Over Time
+# ==============================================================================
+
+cat("\n=== Interview Mode Distribution Over Time ===\n")
+
+# Define the specific order for interview modes 
+mode_numbers <- c(170, 150, 131, 140, 132, 230, 220, 110, 120, 160, 210)
+
+# Calculate interview mode distribution by year
+mode_by_year <- d_analysis %>%
+  filter(!is.na(pgmode), !is.na(syear)) %>%
+  # Extract just the number from pgmode
+  mutate(pgmode_num = as.numeric(str_extract(pgmode, "\\d+"))) %>%
+  filter(!is.na(pgmode_num)) %>%
+  # Only keep modes in our specified list
+  filter(pgmode_num %in% mode_numbers) %>%
+  group_by(syear, pgmode_num) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(syear) %>%
+  mutate(
+    total = sum(n),
+    percentage = (n / total) * 100
+  ) %>%
+  ungroup() %>%
+  mutate(
+    syear_num = as.numeric(as.character(syear)),
+    pgmode_num = factor(pgmode_num, levels = mode_numbers)
+  ) %>%
+  filter(!is.na(pgmode_num))  # Remove any NA factors
+
+# Get overall mode frequencies for summary
+mode_order_overall <- mode_by_year %>%
+  group_by(pgmode_num) %>%
+  summarise(total_n = sum(n), .groups = "drop") %>%
+  arrange(match(pgmode_num, mode_numbers))
+
+cat("\nInterview mode coverage:\n")
+print(mode_order_overall)
+
+# Plot 3: Heatmap of interview mode by year
+p_mode_heatmap <- ggplot(mode_by_year, 
+                         aes(x = syear_num, y = pgmode_num, fill = percentage)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_viridis_c(
+    name = "Percentage\n(%)",
+    option = "plasma",
+    direction = -1
+  ) +
+  labs(
+    title = "Interview Mode Distribution: Heatmap by Year",
+    subtitle = "Percentage of each interview mode over time",
+    x = "Survey Year",
+    y = "Interview Mode"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10)
+  )
+
+print(p_mode_heatmap)
+```
+
+

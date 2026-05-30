@@ -1,0 +1,376 @@
+---
+title: "Loading"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r }
+library(tidyverse)
+library(haven)
+library(Hmisc)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(plm)
+
+pathsoep <- file.path(getwd(), "soepdata")
+
+```
+
+```{r }
+# ==============================================================================
+# Load and prepare PPATHL 
+# ==============================================================================
+
+ppathl <- readRDS(paste0(pathsoep, "/", "ppathl.rds"))
+
+ppathl <- ppathl %>%
+  select(
+    pid, hid, syear,
+    netto, pop,
+    sex, gebjahr, partner, migback,
+    psample, todjahr
+  ) %>%
+  filter(
+    syear >= 2002 & syear <= 2023,
+    pop %in% c(1, 2)
+  ) %>%
+  mutate(
+    interviewed = netto >= 10 & netto <= 19 
+  ) %>%
+  select(-netto, -pop) %>%
+  arrange(pid, syear)
+
+```
+
+```{r }
+# ==============================================================================
+# Load and prepare HEALTH data
+# ==============================================================================
+
+health <- readRDS(paste0(pathsoep, "/", "health.rds"))
+
+health <- health %>%
+  select(pid, syear, 
+         mcs, pcs, 
+         height, fheight, 
+         weight, fweight, 
+         bmi,
+         pf_nbs, rp_nbs, bp_nbs, gh_nbs, vt_nbs, sf_nbs, re_nbs, mh_nbs) %>%
+  filter(syear >= 2002 & syear <= 2023) %>%
+  arrange(pid, syear)
+```
+
+
+```{r }
+# ==============================================================================
+# Load and prepare GRIPSTR (Grip Strength) data
+# ==============================================================================
+
+gripstr <- readRDS(paste0(pathsoep, "/", "gripstr.rds"))
+
+gripstr <- gripstr %>%
+  select(pid, syear, 
+         gs01, gs02, gs03, gs04, gs05, gs06, gs07) %>%
+  filter(syear >= 2002 & syear <= 2023) %>%
+  # Exclude observations with test procedure variations
+  filter(gs07 != 1 | is.na(gs07)) %>%
+  # Calculate maximum grip strength
+  mutate(
+    grip_right_max = pmax(gs03, gs04, na.rm = TRUE),
+    grip_left_max = pmax(gs05, gs06, na.rm = TRUE),
+    grip_max = pmax(grip_right_max, grip_left_max, na.rm = TRUE)
+  ) %>%
+  select(pid, syear, gs01, gs02, grip_right_max, grip_left_max, grip_max) %>%
+  arrange(pid, syear)
+
+```
+
+```{r }
+# ==============================================================================
+# Load and prepare PL (Personal) data
+# ==============================================================================
+
+pl <- readRDS(paste0(pathsoep, "/", "pl.rds"))
+
+pl <- pl %>%
+  select(pid, hid, syear, sample1, ple0010_h) %>%
+  filter(syear >= 2002 & syear <= 2023) %>%
+  arrange(hid, pid, syear)
+```
+
+```{r }
+# ==============================================================================
+# Load and prepare PGEN (Generated Personal) data
+# ==============================================================================
+
+pgen <- readRDS(paste0(pathsoep, "/", "pgen.rds"))
+
+pgen <- pgen %>%
+  select(pid, hid, syear, 
+         pgpartz, pgemplst, pglabgro, pglabnet, 
+         pgjobch, pgtatzeit, pgbilzeit, pgmode) %>%
+  filter(syear >= 2002 & syear <= 2023) %>%
+  arrange(pid, syear)
+```
+
+```{r }
+# ==============================================================================
+# Merge all datasets
+# ==============================================================================
+
+# Start with ppathl as base
+d <- ppathl
+
+# Join health data
+d <- left_join(d, health, by = c("pid", "syear"))
+rm(health)
+
+# Join grip strength data
+d <- left_join(d, gripstr, by = c("pid", "syear"))
+rm(gripstr)
+
+# Join pl data
+d <- left_join(d, pl, by = c("pid", "hid", "syear"))
+rm(pl)
+
+# Join pgen data
+d <- left_join(d, pgen, by = c("pid", "hid", "syear"))
+rm(pgen, ppathl)
+```
+
+```{r }
+# ==============================================================================
+# Data cleaning and variable creation
+# ==============================================================================
+
+# Remove value labels
+d <- d %>% zap_labels() %>% zap_label()
+
+# Flag known death with unknown year before recoding
+d$maybe_dead <- ifelse(d$todjahr == -2, 1, 0)
+
+# Recode SOEP missing values (-9 to -1) to NA
+numeric_cols <- sapply(d, is.numeric)
+d[, numeric_cols] <- lapply(d[, numeric_cols], function(x) {
+  x[x %in% seq(-9, -1, 1)] <- NA
+  x
+})
+
+# Create age variable
+d$age <- d$syear - d$gebjahr
+
+# Alternative: use ple0010_h if available
+d$age <- ifelse(is.na(d$age) & !is.na(d$ple0010_h), 
+                d$syear - d$ple0010_h, 
+                d$age)
+
+
+# Create female dummy variable
+d$female <- ifelse(d$sex == 2, 1, 0)
+d$female <- factor(d$female,
+                   levels = c(0, 1),
+                   labels = c("Men", "Women"))
+```
+
+```{r }
+# ==============================================================================
+# Filter observations
+# ==============================================================================
+
+# Check for height/weight flags and create clean variables
+d <- d %>%
+  mutate(
+    height_clean = ifelse(fheight > 0 | is.na(fheight), NA, height),
+    weight_clean = ifelse(fweight > 0 | is.na(fweight), NA, weight)
+  )
+
+# Winsorize labor income (top and bottom 0.5%)
+if(sum(!is.na(d$pglabgro)) > 0) {
+  d <- d %>% 
+    mutate(
+      pglabgro_win = ifelse(
+        !is.na(pglabgro) & 
+        pglabgro > quantile(pglabgro, 0.005, na.rm = TRUE) &
+        pglabgro < quantile(pglabgro, 0.995, na.rm = TRUE),
+        pglabgro, NA
+      )
+    )
+}
+
+# Forward-fill health variables within each person
+d <- d %>%
+  group_by(pid) %>%
+  arrange(pid, syear) %>%
+  mutate(
+    # Forward-fill health variables
+    mcs = zoo::na.locf(mcs, na.rm = FALSE),
+    pcs = zoo::na.locf(pcs, na.rm = FALSE),
+    bmi = zoo::na.locf(bmi, na.rm = FALSE),
+    grip_max = zoo::na.locf(grip_max, na.rm = FALSE),
+    # Forward-fill height and weight
+    height = zoo::na.locf(height, na.rm = FALSE),
+    fheight = zoo::na.locf(fheight, na.rm = FALSE),
+    weight = zoo::na.locf(weight, na.rm = FALSE),
+    fweight = zoo::na.locf(fweight, na.rm = FALSE),
+    # Do the same for all health variables
+    across(c(pf_nbs, rp_nbs, bp_nbs, gh_nbs, vt_nbs, sf_nbs, re_nbs, mh_nbs),
+           ~zoo::na.locf(., na.rm = FALSE))
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r }
+# ==============================================================================
+# Define Attrition: Last obs year, not incl 2023 or when last year is death
+# ==============================================================================
+
+d <- d %>%
+  arrange(pid, syear) %>%
+  group_by(pid) %>%
+  mutate(
+    last_obs_year = max(syear),
+    death_year = max(todjahr, na.rm = TRUE),
+    attrition = as.integer(syear == last_obs_year & 
+                          last_obs_year < 2023 &
+                          (is.na(death_year) | last_obs_year != death_year))
+  ) %>%
+  ungroup()
+
+```
+
+
+
+```{r }
+# ==============================================================================
+# Variable availability by year
+# ==============================================================================
+
+# Function to check which years each variable has data
+check_variable_years <- function(data, vars) {
+  results <- list()
+  
+  for(var in vars) {
+    if(var %in% names(data)) {
+      years_available <- data %>%
+        filter(!is.na(.data[[var]])) %>%
+        group_by(syear) %>%
+        summarise(n = n(), .groups = "drop") %>%
+        filter(n > 0) %>%
+        pull(syear)
+      
+      results[[var]] <- list(
+        variable = var,
+        years = paste(years_available, collapse = ", "),
+        n_years = length(years_available),
+        first_year = ifelse(length(years_available) > 0, min(years_available), NA),
+        last_year = ifelse(length(years_available) > 0, max(years_available), NA),
+        total_obs = sum(!is.na(data[[var]]))
+      )
+    } else {
+      results[[var]] <- list(
+        variable = var,
+        years = "Variable not found",
+        n_years = 0,
+        first_year = NA,
+        last_year = NA,
+        total_obs = 0
+      )
+    }
+  }
+  
+  # Convert to data frame
+  bind_rows(results)
+}
+
+# Check health variables
+health_vars_list <- c("mcs", "pcs", "bmi", "height", "weight",
+                      "pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs",
+                      "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs",
+                      "grip_max", "grip_right_max", "grip_left_max")
+
+cat("\n=== Health Variables Availability ===\n")
+health_availability <- check_variable_years(d, health_vars_list)
+print(kable(health_availability, 
+            caption = "Health Variables by Year") %>%
+  kable_styling(latex_options = c("hold_position", "striped")))
+
+
+# Check socioeconomic variables
+socio_vars_list <- c("age", "pglabgro", "pglabnet",
+                     "pgtatzeit", "pgbilzeit", "pgemplst", "pgpartz")
+
+cat("\n=== Socioeconomic Variables Availability ===\n")
+socio_availability <- check_variable_years(d, socio_vars_list)
+print(kable(socio_availability,
+            caption = "Socioeconomic Variables by Year") %>%
+  kable_styling(latex_options = c("hold_position", "striped")))
+
+```
+
+```{r }
+# ==============================================================================
+# Panel structure analysis
+# ==============================================================================
+
+# Number of unique individuals
+num_panels <- d %>% summarise(num_panels = n_distinct(pid)) %>% pull(num_panels)
+
+# Number of unique time periods
+num_times <- d %>% summarise(num_times = n_distinct(syear)) %>% pull(num_times)
+
+# Total number of observations
+total_obs <- nrow(d)
+
+cat("\n=== Panel Structure ===\n")
+cat("Number of individuals:", num_panels, "\n")
+cat("Number of time periods:", num_times, "\n")
+cat("Total observations:", total_obs, "\n")
+
+# Observations per individual
+obs_per_panel <- d %>%
+  group_by(pid) %>%
+  summarise(
+    N_obs = n(),
+    time_min = min(syear),
+    time_max = max(syear),
+    time_span = time_max - time_min + 1,
+    N_time_periods = n_distinct(syear),
+    has_gaps = N_time_periods < time_span
+  )
+
+cat("\nObservations per individual:\n")
+print(summary(obs_per_panel$N_obs))
+
+# Check if balanced
+is_balanced <- length(unique(obs_per_panel$N_obs)) == 1 && all(!obs_per_panel$has_gaps)
+cat("\nIs panel balanced?", is_balanced, "\n")
+
+# Number of panels with gaps
+num_panels_with_gaps <- sum(obs_per_panel$has_gaps)
+cat("Number of individuals with gaps:", num_panels_with_gaps, "\n")
+
+
+```
+
+
+```{r }
+# ==============================================================================
+# Export cleaned data
+# ==============================================================================
+
+# Save as RDS
+saveRDS(d, file.path(getwd(), "health_analysis_cleaned.rds"))
+
+cat("\n=== Data preparation complete ===\n")
+cat("Cleaned dataset saved as:", paste0("health_analysis_cleaned.rds"), "\n")
+```
+
+
+
+

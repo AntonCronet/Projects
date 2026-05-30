@@ -1,0 +1,931 @@
+---
+title: "Model"
+output: html_document
+---
+
+
+```{r }
+library(tidyverse)
+library(plm)
+library(lmtest)
+library(sandwich)
+library(stargazer)
+library(broom)
+library(patchwork)
+
+
+ d <- readRDS("health_analysis_cleaned.rds")
+```
+
+```{r }
+# Data manipulation and attrition % check
+
+d_analysis <- d %>%
+  filter(syear < 2023) %>%  # Exclude 2023 (no attrition observable)
+  mutate(
+    # Standardize only BMI and grip (different units)
+    bmi_std = scale(bmi)[,1],
+    
+    # Employment status categories
+    employed = ifelse(pgemplst %in% c(1, 2, 3, 4), 1, 0) # 5 is unemployed, rest is occupied
+  )
+
+# Summary of attrition by year
+cat("=== Attrition Summary by Year ===\n")
+d_analysis %>%
+  group_by(syear) %>%
+  summarise(
+    n = n(),
+    n_attrition = sum(attrition == 1, na.rm = TRUE),
+    pct_attrition = round(100 * n_attrition / n, 2)
+  ) %>%
+  print(n = Inf)
+```
+
+```{r }
+# ==============================================================================
+# 2. Model 1: Basic health measures
+# ==============================================================================
+
+model1 <- glm(attrition ~ mcs + pcs + bmi_std + age + female,
+              data = d_analysis,
+              family = binomial(link = "logit"))
+
+cat("\n=== Model 1: Basic Health Measures ===\n")
+summary(model1)
+
+
+# ==============================================================================
+# 3. Model 2: Add SF-12 subscales
+# ==============================================================================
+
+model2 <- glm(attrition ~ pf_nbs + rp_nbs + bp_nbs + gh_nbs + 
+                vt_nbs + sf_nbs + re_nbs + mh_nbs +
+                bmi_std + age + female,
+              data = d_analysis,
+              family = binomial(link = "logit"))
+
+cat("\n=== Model 2: SF-12 Subscales ===\n")
+summary(model2)
+
+
+# ==============================================================================
+# 4. Model 3: Add grip strength
+# ==============================================================================
+
+model3 <- glm(attrition ~ mcs + pcs + bmi_std + grip_max +
+                age + female,
+              data = d_analysis,
+              family = binomial(link = "logit"))
+
+cat("\n=== Model 3: With Grip Strength ===\n")
+summary(model3)
+
+
+# ==============================================================================
+# 5. Model 4: Full model with socioeconomic controls
+# ==============================================================================
+
+model4 <- glm(attrition ~ bmi_std + grip_max +
+              pf_nbs + rp_nbs + bp_nbs + gh_nbs + vt_nbs + sf_nbs + re_nbs + mh_nbs +
+              age + female + employed + migback + partner + 
+              pgtatzeit + pgbilzeit + factor(pgmode) +
+              factor(psample) + factor(syear),
+              data = d_analysis,
+              family = binomial(link = "logit"))
+
+cat("\n=== Model 4: Full Model with Controls ===\n")
+summary(model4)
+
+
+# ==============================================================================
+# 5. Model 5: Full model with socioeconomic controls - Dummed-down health data
+# ==============================================================================
+
+model5 <- glm(attrition ~ bmi_std + grip_max +
+              mcs + pcs +
+              age + female + employed + migback + partner + 
+              pgtatzeit + pgbilzeit + factor(pgmode) +
+              factor(psample) + factor(syear),
+              data = d_analysis,
+              family = binomial(link = "logit"))
+
+cat("\n=== Model 5: Full Model dummed down health ===\n")
+summary(model5)
+
+
+```
+
+
+# ==============================================================================
+# Model 4 Bayesian: Full model with socioeconomic controls
+# ==============================================================================
+
+```{r }
+library(rstanarm)
+library(bayesplot)
+
+# ==============================================================================
+# Model 4 Bayesian: Full model with socioeconomic controls
+# ==============================================================================
+
+set.seed(42)  # For reproducibility
+
+# Fit Bayesian logistic regression with weakly informative priors
+model4_bayes <- stan_glm(
+  attrition ~ bmi_std + grip_max +
+    pf_nbs + rp_nbs + bp_nbs + gh_nbs + vt_nbs + sf_nbs + re_nbs + mh_nbs +
+    age + female + employed + migback + partner + 
+    pgtatzeit + pgbilzeit + factor(pgmode) +
+    factor(psample) + factor(syear),
+  data = d_analysis,
+  family = binomial(link = "logit"),
+  
+  # Priors
+  prior = normal(0, 2.5),           # Weakly informative prior for coefficients
+  prior_intercept = normal(0, 5),   # Prior for intercept
+  
+  # MCMC settings
+  chains = 4,                        # Number of Markov chains
+  iter = 2000,                       # Total iterations per chain
+  warmup = 1000,                     # Burn-in iterations
+  cores = 8,                         # Parallel processing
+  refresh = 250,                     # Progress updates
+  
+  # Diagnostics
+  seed = 42
+)
+
+cat("\n=== Model 4 Bayesian: Full Model with Controls ===\n")
+print(model4_bayes, digits = 3)
+
+# Model diagnostics
+cat("\n=== Bayesian Diagnostics ===\n")
+cat("R-hat values (should be < 1.01):\n")
+rhat_vals <- summary(model4_bayes)[, "Rhat"]
+print(rhat_vals)
+cat("\nAny problematic R-hat values?:", any(rhat_vals > 1.01, na.rm = TRUE), "\n")
+
+cat("\nEffective sample sizes (should be > 400):\n")
+neff_vals <- summary(model4_bayes)[, "n_eff"]
+print(summary(neff_vals))
+cat("Any low ESS?:", any(neff_vals < 400, na.rm = TRUE), "\n")
+
+# Posterior predictive checks
+cat("\n=== Posterior Predictive Checks ===\n")
+
+# Check mean attrition rate
+pp_check(model4_bayes, plotfun = "stat", stat = "mean") +
+  labs(title = "Posterior Predictive Check: Mean Attrition Rate",
+       subtitle = "Does the model reproduce the observed attrition rate?")
+
+# Check binary outcome distribution
+pp_check(model4_bayes, plotfun = "bars", nreps = 50) +
+  labs(title = "Posterior Predictive Check: Binary Outcome Distribution",
+       subtitle = "Observed (dark) vs Predicted (light) attrition")
+
+# Compare with frequentist model
+cat("\n=== Comparison: Frequentist vs Bayesian ===\n")
+comparison_df <- data.frame(
+  Variable = names(coef(model4)),
+  Frequentist = coef(model4),
+  Bayesian = coef(model4_bayes),
+  Difference = coef(model4_bayes) - coef(model4)
+)
+print(comparison_df, digits = 3)
+
+# Credible intervals (Bayesian) vs Confidence intervals (Frequentist)
+cat("\n=== 95% Credible Intervals (Bayesian) ===\n")
+bayes_ci <- posterior_interval(model4_bayes, prob = 0.95)
+print(head(bayes_ci, 15))  # Show first 15 for readability
+
+cat("\n=== 95% Confidence Intervals (Frequentist) ===\n")
+freq_ci <- confint(model4)
+print(head(freq_ci, 15))
+
+
+
+# Model comparison metrics
+cat("\n=== Model Fit Metrics ===\n")
+cat("LOO (Leave-One-Out Cross-Validation):\n")
+loo_model4 <- loo(model4_bayes)
+print(loo_model4)
+
+cat("\nWAIC (Watanabe-Akaike Information Criterion):\n")
+waic_model4 <- waic(model4_bayes)
+print(waic_model4)
+```
+
+```{r }
+library(rstanarm)
+library(tidyverse)
+library(bayesplot)
+
+# ==============================================================================
+# 1. Basic Model Summary
+# ==============================================================================
+
+cat("\n=== Model 4 Bayesian: Posterior Summary ===\n")
+print(model4_bayes, digits = 3)
+
+# ==============================================================================
+# 2. Odds Ratios (more intuitive than log-odds)
+# ==============================================================================
+
+cat("\n=== Odds Ratios with 95% Credible Intervals ===\n")
+
+# Extract posterior draws
+posterior <- as.matrix(model4_bayes)
+
+# Calculate odds ratios (exp of coefficients)
+odds_ratios <- exp(posterior)
+
+# Get posterior means and credible intervals
+or_summary <- data.frame(
+  Variable = colnames(odds_ratios),
+  OR = apply(odds_ratios, 2, mean),
+  OR_Median = apply(odds_ratios, 2, median),
+  CI_Lower = apply(odds_ratios, 2, quantile, probs = 0.025),
+  CI_Upper = apply(odds_ratios, 2, quantile, probs = 0.975),
+  Prob_OR_gt_1 = apply(odds_ratios, 2, function(x) mean(x > 1))
+)
+
+# Focus on key variables (exclude intercept and factor levels)
+key_vars <- c("bmi_std", "grip_max", "pf_nbs", "rp_nbs", "bp_nbs", 
+              "gh_nbs", "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs",
+              "age", "female", "employed", "migback", "partner",
+              "pgtatzeit", "pgbilzeit")
+
+or_key <- or_summary %>%
+  filter(Variable %in% key_vars) %>%
+  arrange(desc(abs(OR - 1)))
+
+print(or_key, digits = 3)
+
+cat("\nInterpretation of Odds Ratios:\n")
+cat("OR > 1: Increases odds of attrition\n")
+cat("OR < 1: Decreases odds of attrition\n")
+cat("OR = 1: No effect\n")
+cat("Prob_OR_gt_1: Probability that OR > 1 (Bayesian 'significance')\n")
+
+# ==============================================================================
+# 3. Percentage Change in Odds (most intuitive)
+# ==============================================================================
+
+cat("\n=== Percentage Change in Odds of Attrition ===\n")
+
+pct_change <- or_key %>%
+  mutate(
+    Pct_Change = (OR - 1) * 100,
+    CI_Lower_Pct = (CI_Lower - 1) * 100,
+    CI_Upper_Pct = (CI_Upper - 1) * 100,
+    Direction = ifelse(Pct_Change > 0, "↑ Increases", "↓ Decreases")
+  ) %>%
+  dplyr::select(Variable, Pct_Change, CI_Lower_Pct, CI_Upper_Pct, Direction, Prob_OR_gt_1)
+
+print(pct_change, digits = 2)
+
+cat("\nExample interpretation:\n")
+cat("If BMI (std) has OR = 1.15, that's a 15% increase in odds of attrition\n")
+cat("If pgtatzeit (years in study) has OR = 0.95, that's a 5% decrease per year\n")
+
+# ==============================================================================
+# 4. Education Variables - Interpretation
+# ==============================================================================
+
+cat("\n=== Education Variables (Time in Study) ===\n")
+
+edu_vars <- c("pgtatzeit", "pgbilzeit")
+or_edu <- or_summary %>%
+  filter(Variable %in% edu_vars)
+
+print(or_edu, digits = 3)
+
+cat("\nInterpretation:\n")
+cat("pgtatzeit = Years respondent has been in SOEP\n")
+cat("pgbilzeit = Years of education\n")
+cat("\nEffect of 5 additional years:\n")
+
+for(var in edu_vars) {
+  or_5yr <- or_edu %>% filter(Variable == var) %>% pull(OR)
+  or_5yr_effect <- or_5yr^5
+  pct_5yr <- (or_5yr_effect - 1) * 100
+  cat(sprintf("  %s: OR = %.3f → 5 years: OR = %.3f (%.1f%% change)\n",
+              var, or_5yr, or_5yr_effect, pct_5yr))
+}
+
+# ==============================================================================
+# 5. Interview Mode Effects
+# ==============================================================================
+
+cat("\n=== Interview Mode Effects (factor(pgmode)) ===\n")
+
+# Get all pgmode factor levels
+pgmode_vars <- grep("factor\\(pgmode\\)", or_summary$Variable, value = TRUE)
+
+if(length(pgmode_vars) > 0) {
+  or_pgmode <- or_summary %>%
+    filter(Variable %in% pgmode_vars) %>%
+    mutate(
+      Mode = gsub("factor\\(pgmode\\)", "", Variable),
+      Pct_Change = (OR - 1) * 100
+    ) %>%
+    arrange(desc(OR)) %>%
+    dplyr::select(Mode, OR, CI_Lower, CI_Upper, Pct_Change, Prob_OR_gt_1)  # Add dplyr::
+  
+  print(or_pgmode, digits = 3)
+  
+  cat("\nReference category (OR = 1.0): Most common interview mode\n")
+  cat("Interpretation: Compared to reference mode, how does each mode affect attrition?\n")
+} else {
+  cat("No factor(pgmode) variables found in model\n")
+}
+
+# ==============================================================================
+# 6. Marginal Effects: Change in predicted probability
+# ==============================================================================
+
+cat("\n=== Marginal Effects: Impact on Predicted Probability ===\n")
+
+cat("\n1. SF-12 Health Subscales (10-point increase):\n")
+cat("   Norm-based scores: mean=50, SD=10\n")
+cat("   A 10-point change = 1 SD in population\n\n")
+
+# Extract coefficients
+coefs <- coef(model4_bayes)
+
+# SF-12 variables
+sf12_vars <- c("pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs", 
+               "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs")
+
+marginal_sf12 <- data.frame(
+  Variable = sf12_vars,
+  Coef = coefs[sf12_vars],
+  OR_per_10pts = exp(coefs[sf12_vars] * 10),
+  Pct_Change_per_10pts = (exp(coefs[sf12_vars] * 10) - 1) * 100
+)
+
+print(marginal_sf12, digits = 3)
+
+cat("\n2. Physical Health Variables:\n")
+physical_vars <- c("bmi_std", "grip_max")
+marginal_physical <- data.frame(
+  Variable = c("BMI (1 SD increase)", "Grip strength (1 kg increase)"),
+  Coef = coefs[physical_vars],
+  OR = exp(coefs[physical_vars]),
+  Pct_Change = (exp(coefs[physical_vars]) - 1) * 100
+)
+print(marginal_physical, digits = 3)
+
+cat("\n3. Time Variables:\n")
+time_vars <- c("age", "pgtatzeit", "pgbilzeit")
+marginal_time <- data.frame(
+  Variable = c("Age (1 year)", "Years in SOEP (1 year)", "Years of education (1 year)"),
+  Coef = coefs[time_vars],
+  OR = exp(coefs[time_vars]),
+  Pct_Change = (exp(coefs[time_vars]) - 1) * 100,
+  OR_10yr = exp(coefs[time_vars] * 10),
+  Pct_Change_10yr = (exp(coefs[time_vars] * 10) - 1) * 100
+)
+print(marginal_time, digits = 3)
+
+# ==============================================================================
+# 7. Visualizations
+# ==============================================================================
+
+cat("\n=== Generating Visualizations ===\n")
+
+# Get available parameters
+available_pars <- names(coef(model4_bayes))
+
+# Match key variables to actual parameter names
+key_vars_actual <- available_pars[available_pars %in% key_vars]
+
+cat("\nPlotting variables:\n")
+print(key_vars_actual)
+
+# Plot 1: Coefficient plot (log-odds scale)
+p1 <- mcmc_intervals(model4_bayes, 
+                     pars = key_vars_actual,
+                     prob = 0.5, prob_outer = 0.95) +
+  labs(title = "Posterior Distributions of Coefficients (Log-Odds)",
+       subtitle = "50% (thick) and 95% (thin) credible intervals") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal()
+
+print(p1)
+
+# Plot 2: Odds Ratios
+or_plot_data <- or_key %>%
+  filter(Variable %in% key_vars_actual)
+
+p2 <- ggplot(or_plot_data, aes(x = reorder(Variable, OR), y = OR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(title = "Odds Ratios with 95% Credible Intervals",
+       subtitle = "OR > 1 increases attrition risk, OR < 1 decreases it",
+       x = "", y = "Odds Ratio") +
+  theme_minimal()
+
+print(p2)
+
+# Plot 3: Percentage change
+pct_change_plot <- pct_change %>%
+  filter(Variable %in% key_vars_actual)
+
+p3 <- ggplot(pct_change_plot, aes(x = reorder(Variable, Pct_Change), y = Pct_Change)) +
+  geom_point(size = 3, aes(color = Direction)) +
+  geom_errorbar(aes(ymin = CI_Lower_Pct, ymax = CI_Upper_Pct), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  coord_flip() +
+  scale_color_manual(values = c("↑ Increases" = "red", "↓ Decreases" = "blue")) +
+  labs(title = "Percentage Change in Odds of Attrition",
+       subtitle = "Effect of 1-unit increase in predictor",
+       x = "", y = "% Change in Odds") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p3)
+
+# Plot 4: Interview Mode Effects (if exists)
+if(length(pgmode_vars) > 0) {
+  mode_plot_data <- or_summary %>%
+    filter(Variable %in% pgmode_vars) %>%
+    mutate(Mode = gsub("factor\\(pgmode\\)", "", Variable))
+  
+  p4 <- ggplot(mode_plot_data, aes(x = reorder(Mode, OR), y = OR)) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2) +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+    coord_flip() +
+    labs(title = "Interview Mode Effects on Attrition",
+         subtitle = "Odds ratios relative to reference mode",
+         x = "Interview Mode", y = "Odds Ratio") +
+    theme_minimal()
+  
+  print(p4)
+}
+
+# ==============================================================================
+# 8. Key Findings Summary
+# ==============================================================================
+
+cat("\n=== KEY FINDINGS SUMMARY ===\n\n")
+
+# Identify strongest effects (main variables only)
+strongest_increase <- or_key %>% 
+  filter(Prob_OR_gt_1 > 0.95, OR > 1) %>%
+  arrange(desc(OR)) %>%
+  slice(1:5)
+
+strongest_decrease <- or_key %>%
+  filter(Prob_OR_gt_1 < 0.05, OR < 1) %>%
+  arrange(OR) %>%
+  slice(1:5)
+
+cat("Factors that INCREASE attrition (>95% probability):\n")
+if(nrow(strongest_increase) > 0) {
+  for(i in 1:nrow(strongest_increase)) {
+    cat(sprintf("  - %s: OR = %.3f (%.1f%% increase, 95%% CI: %.3f-%.3f)\n",
+                strongest_increase$Variable[i],
+                strongest_increase$OR[i],
+                (strongest_increase$OR[i] - 1) * 100,
+                strongest_increase$CI_Lower[i],
+                strongest_increase$CI_Upper[i]))
+  }
+} else {
+  cat("  None with >95% probability\n")
+}
+
+cat("\nFactors that DECREASE attrition (>95% probability):\n")
+if(nrow(strongest_decrease) > 0) {
+  for(i in 1:nrow(strongest_decrease)) {
+    cat(sprintf("  - %s: OR = %.3f (%.1f%% decrease, 95%% CI: %.3f-%.3f)\n",
+                strongest_decrease$Variable[i],
+                strongest_decrease$OR[i],
+                (1 - strongest_decrease$OR[i]) * 100,
+                strongest_decrease$CI_Lower[i],
+                strongest_decrease$CI_Upper[i]))
+  }
+} else {
+  cat("  None with >95% probability\n")
+}
+
+# Special summary for education/time variables
+cat("\n=== SUBSTANTIVE INTERPRETATION ===\n\n")
+
+cat("Years in SOEP (pgtatzeit):\n")
+pgt_or <- or_key %>% filter(Variable == "pgtatzeit") %>% pull(OR)
+cat(sprintf("  Each additional year in study: %.1f%% change in attrition odds\n",
+            (pgt_or - 1) * 100))
+cat(sprintf("  10 years in study: %.1f%% cumulative change\n",
+            (pgt_or^10 - 1) * 100))
+
+cat("\nYears of Education (pgbilzeit):\n")
+pgb_or <- or_key %>% filter(Variable == "pgbilzeit") %>% pull(OR)
+cat(sprintf("  Each additional year of education: %.1f%% change in attrition odds\n",
+            (pgb_or - 1) * 100))
+cat(sprintf("  University degree vs high school (4 extra years): %.1f%% change\n",
+            (pgb_or^4 - 1) * 100))
+
+
+
+# ==============================================================================
+# Focused Plot: Health + BMI + Grip + Age
+# ==============================================================================
+
+health_vars <- c(
+  "pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs",
+  "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs",
+  "bmi_std", "grip_max", "age"
+)
+
+plot_data <- or_summary %>%
+  filter(Variable %in% health_vars) %>%
+  mutate(
+    Variable = factor(
+      Variable,
+      levels = health_vars,
+      labels = c(
+        "Physical Functioning",
+        "Role Physical",
+        "Bodily Pain",
+        "General Health",
+        "Vitality",
+        "Social Functioning",
+        "Role Emotional",
+        "Mental Health",
+        "BMI (std)",
+        "Grip Strength",
+        "Age"
+      )
+    )
+  )
+
+ggplot(plot_data, aes(x = Variable, y = OR)) +
+  geom_point(size = 3, color = "#E69F00") +
+  geom_errorbar(
+    aes(ymin = CI_Lower, ymax = CI_Upper),
+    width = 0.15,
+    color = "grey40"
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey60") +
+  coord_flip() +
+  labs(
+    title = "Health, Physical, and Age Effects on Attrition",
+    subtitle = "Odds ratios with 95% credible intervals",
+    x = "",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(color = "grey20")
+  )
+
+# ==============================================================================
+# Split Plots: SF-12 Health vs Physical/Demographic Variables
+# ==============================================================================
+
+cat("\n=== Percentage Change in Odds: Split by Variable Type ===\n")
+
+# SF-12 Health Subscales (8 variables)
+sf12_vars <- c("pf_nbs", "rp_nbs", "bp_nbs", "gh_nbs",
+               "vt_nbs", "sf_nbs", "re_nbs", "mh_nbs")
+
+# Physical and demographic variables (use "femaleWomen" for the factor level)
+other_vars <- c("bmi_std", "grip_max", "age", "femaleWomen", "employed", 
+                "migback", "partner", "pgtatzeit", "pgbilzeit")
+
+# ==============================================================================
+# PLOT 1: SF-12 Health Subscales Only (with meaningful interpretation)
+# ==============================================================================
+
+pct_sf12_data <- or_summary %>%
+  filter(Variable %in% sf12_vars) %>%
+  mutate(
+    Pct_Change = (OR - 1) * 100,
+    CI_Lower_Pct = (CI_Lower - 1) * 100,
+    CI_Upper_Pct = (CI_Upper - 1) * 100,
+    # Calculate effect for 10-point (1 SD) increase
+    Pct_Change_10pt = (exp(log(OR) * 10) - 1) * 100,
+    CI_Lower_10pt = (exp(log(CI_Lower) * 10) - 1) * 100,
+    CI_Upper_10pt = (exp(log(CI_Upper) * 10) - 1) * 100,
+    Variable_Label = factor(
+      Variable,
+      levels = sf12_vars,
+      labels = c(
+        "Physical Functioning",
+        "Role Physical",
+        "Bodily Pain",
+        "General Health",
+        "Vitality",
+        "Social Functioning",
+        "Role Emotional",
+        "Mental Health"
+      )
+    )
+  )
+
+# Print SF-12 table with BOTH 1-point and 10-point effects
+cat("\n--- SF-12 Health Subscales ---\n")
+cat("Note: SF-12 scores are norm-based with mean=50, SD=10\n")
+cat("      10-point change = 1 standard deviation in population\n\n")
+
+sf12_table <- pct_sf12_data %>%
+  dplyr::select(Variable_Label, 
+         Pct_Change, CI_Lower_Pct, CI_Upper_Pct,
+         Pct_Change_10pt, CI_Lower_10pt, CI_Upper_10pt,
+         Prob_OR_gt_1) %>%
+  arrange(desc(abs(Pct_Change_10pt)))
+
+print(sf12_table, digits = 2)
+
+cat("\nInterpretation:\n")
+cat("- Pct_Change: Effect per 1-point increase (small change)\n")
+cat("- Pct_Change_10pt: Effect per 10-point (1 SD) increase (meaningful change)\n")
+cat("- Example: If Mental Health has -20% effect per 10 points:\n")
+cat("    → Person scoring 60 (good) vs 40 (poor) has 20% LOWER attrition odds\n")
+cat("    → Person scoring 70 (excellent) vs 50 (average) has 20% LOWER attrition odds\n\n")
+
+# Create SF-12 plot with 10-POINT (1 SD) EFFECTS
+p_sf12 <- ggplot(pct_sf12_data, aes(x = reorder(Variable_Label, Pct_Change_10pt), 
+                                     y = Pct_Change_10pt)) +
+  geom_point(size = 3.5, color = "#0072B2") +
+  geom_errorbar(
+    aes(ymin = CI_Lower_10pt, ymax = CI_Upper_10pt),
+    width = 0.2,
+    color = "grey40",
+    linewidth = 0.8
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  coord_flip() +
+  labs(
+    title = "SF-12 Health Subscales: Effect on Attrition",
+    subtitle = "Percentage change in odds per 10-point (1 SD) increase\nin health score (95% CI)",
+    x = "",
+    y = "% Change in Odds of Attrition (per 10 points)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    axis.text.y = element_text(color = "grey20", size = 11),
+    plot.margin = margin(10, 20, 10, 10)
+  )
+
+print(p_sf12)
+
+# ==============================================================================
+# Additional interpretation: Clinical/practical examples
+# ==============================================================================
+
+cat("\n=== PRACTICAL INTERPRETATION OF SF-12 EFFECTS ===\n\n")
+
+cat("SF-12 Score Reference Points:\n")
+cat("  30-40 = Severe impairment (bottom 2%)\n")
+cat("  40-50 = Below average health (bottom 16-50%)\n")
+cat("  50    = Population average\n")
+cat("  50-60 = Above average health (top 16-50%)\n")
+cat("  60-70 = Excellent health (top 2-16%)\n\n")
+
+# Show the most impactful SF-12 subscales
+top_sf12 <- pct_sf12_data %>%
+  arrange(desc(abs(Pct_Change_10pt))) %>%
+  dplyr::select(Variable_Label, Pct_Change_10pt, CI_Lower_10pt, CI_Upper_10pt) %>%
+  head(3)
+
+cat("Top 3 Most Impactful Health Dimensions:\n")
+for(i in 1:nrow(top_sf12)) {
+  direction <- ifelse(top_sf12$Pct_Change_10pt[i] > 0, "INCREASES", "DECREASES")
+  cat(sprintf("\n%d. %s:\n", i, top_sf12$Variable_Label[i]))
+  cat(sprintf("   → %.1f%% %s in attrition per 10-point improvement (95%% CI: %.1f to %.1f)\n",
+              abs(top_sf12$Pct_Change_10pt[i]),
+              direction,
+              top_sf12$CI_Lower_10pt[i],
+              top_sf12$CI_Upper_10pt[i]))
+  cat(sprintf("   → Comparing someone at 40 (poor) vs 60 (good):\n"))
+  cat(sprintf("      20-point difference = %.1f%% change in attrition odds\n",
+              top_sf12$Pct_Change_10pt[i] * 2))
+}
+
+# ==============================================================================
+# PLOT 2: Physical, Demographic, and Control Variables
+# ==============================================================================
+
+pct_other_data <- or_summary %>%
+  filter(Variable %in% other_vars) %>%
+  mutate(
+    Pct_Change = (OR - 1) * 100,
+    CI_Lower_Pct = (CI_Lower - 1) * 100,
+    CI_Upper_Pct = (CI_Upper - 1) * 100,
+    Variable_Label = factor(
+      Variable,
+      levels = other_vars,
+      labels = c(
+        "BMI (1 SD)",
+        "Grip Strength (1 kg)",
+        "Age (1 year)",
+        "Female (vs Male)",
+        "Employed",
+        "Migration Background",
+        "Has Partner",
+        "Work Hours Per Week",
+        "Years of Education"
+      )
+    )
+  )
+
+# Print other variables table
+cat("\n\n--- Physical, Demographic, and Control Variables ---\n")
+other_table <- pct_other_data %>%
+  dplyr::select(Variable_Label, Pct_Change, CI_Lower_Pct, CI_Upper_Pct, Prob_OR_gt_1) %>%
+  arrange(desc(abs(Pct_Change)))
+
+print(other_table, digits = 2)
+
+cat("\nNote: Effects per unit increase (see labels for units)\n")
+cat("Binary variables (Female, Employed, Migration Background, Has Partner):\n")
+cat("  → Shows % change comparing 1 (yes) vs 0 (no)\n\n")
+
+# Create other variables plot
+p_other <- ggplot(pct_other_data, aes(x = reorder(Variable_Label, Pct_Change), y = Pct_Change)) +
+  geom_point(size = 3.5, color = "#D55E00") +
+  geom_errorbar(
+    aes(ymin = CI_Lower_Pct, ymax = CI_Upper_Pct),
+    width = 0.2,
+    color = "grey40",
+    linewidth = 0.8
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  coord_flip() +
+  labs(
+    title = "Physical, Demographic, and Control Variables:\nEffect on Attrition",
+    subtitle = "Percentage change in odds per unit increase (95% CI)",
+    x = "",
+    y = "% Change in Odds of Attrition"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    axis.text.y = element_text(color = "grey20", size = 11),
+    plot.margin = margin(10, 20, 10, 10)
+  )
+
+print(p_other)
+
+# ==============================================================================
+# Summary Statistics
+# ==============================================================================
+
+cat("\n=== SUMMARY STATISTICS ===\n\n")
+
+cat("SF-12 Health Subscales:\n")
+cat(sprintf("  Mean absolute effect: %.2f%%\n", mean(abs(pct_sf12_data$Pct_Change_10pt))))
+cat(sprintf("  Range: %.2f%% to %.2f%%\n", 
+            min(pct_sf12_data$Pct_Change_10pt), 
+            max(pct_sf12_data$Pct_Change_10pt)))
+
+cat("\nPhysical/Demographic Variables:\n")
+cat(sprintf("  Mean absolute effect: %.2f%%\n", mean(abs(pct_other_data$Pct_Change))))
+cat(sprintf("  Range: %.2f%% to %.2f%%\n", 
+            min(pct_other_data$Pct_Change), 
+            max(pct_other_data$Pct_Change)))
+
+```
+
+
+
+# ==============================================================================
+# Robustness check, Right Censoring 
+# ==============================================================================
+
+```{r }
+
+library(rstanarm)
+library(bayesplot)
+
+
+d_analysis_robust <- d_analysis %>%
+  filter(syear < 2020)   # Exclude 2020 
+  
+
+# ==============================================================================
+# Model 4 Bayesian: Full model with socioeconomic controls
+# ==============================================================================
+
+set.seed(42)  # For reproducibility
+
+# Fit Bayesian logistic regression with weakly informative priors
+model4_bayes_robust <- stan_glm(
+  attrition ~ bmi_std + grip_max +
+    pf_nbs + rp_nbs + bp_nbs + gh_nbs + vt_nbs + sf_nbs + re_nbs + mh_nbs +
+    age + female + employed + migback + partner + 
+    pgtatzeit + pgbilzeit + factor(pgmode) +
+    factor(psample) + factor(syear),
+  data = d_analysis_robust,
+  family = binomial(link = "logit"),
+  
+  # Priors
+  prior = normal(0, 2.5),           # Weakly informative prior for coefficients
+  prior_intercept = normal(0, 5),   # Prior for intercept
+  
+  # MCMC settings
+  chains = 4,                        # Number of Markov chains
+  iter = 2000,                       # Total iterations per chain
+  warmup = 1000,                     # Burn-in iterations
+  cores = 8,                         # Parallel processing
+  refresh = 250,                     # Progress updates
+  
+  # Diagnostics
+  seed = 42
+)
+
+cat("\n=== Model 4 Bayesian: Full Model with Controls ===\n")
+print(model4_bayes_robust, digits = 3)
+
+# Model diagnostics
+cat("\n=== Bayesian Diagnostics ===\n")
+cat("R-hat values (should be < 1.01):\n")
+rhat_vals <- summary(model4_bayes_robust)[, "Rhat"]
+print(rhat_vals)
+cat("\nAny problematic R-hat values?:", any(rhat_vals > 1.01, na.rm = TRUE), "\n")
+
+cat("\nEffective sample sizes (should be > 400):\n")
+neff_vals <- summary(model4_bayes_robust)[, "n_eff"]
+print(summary(neff_vals))
+cat("Any low ESS?:", any(neff_vals < 400, na.rm = TRUE), "\n")
+
+# Posterior predictive checks
+cat("\n=== Posterior Predictive Checks ===\n")
+
+# Check mean attrition rate
+pp_check(model4_bayes_robust, plotfun = "stat", stat = "mean") +
+  labs(title = "Posterior Predictive Check: Mean Attrition Rate",
+       subtitle = "Does the model reproduce the observed attrition rate?")
+
+# Check binary outcome distribution
+pp_check(model4_bayes_robust, plotfun = "bars", nreps = 50) +
+  labs(title = "Posterior Predictive Check: Binary Outcome Distribution",
+       subtitle = "Observed (dark) vs Predicted (light) attrition")
+
+# Compare with first model
+cat("\n=== Comparison: Frequentist vs Bayesian ===\n")
+# Get coefficients from both models
+freq_coefs <- coef(model4_bayes)
+bayes_coefs <- coef(model4_bayes_robust)
+
+
+# Find common variable names
+common_vars <- intersect(names(freq_coefs), names(bayes_coefs))
+
+# Create comparison dataframe with only common variables
+comparison_df <- data.frame(
+  Variable = common_vars,
+  Frequentist = freq_coefs[common_vars],
+  Bayesian = bayes_coefs[common_vars],
+  Difference = bayes_coefs[common_vars] - freq_coefs[common_vars]
+)
+
+# View the comparison
+print(comparison_df, digits = 3)
+
+# Credible intervals (Bayesian) vs Confidence intervals (Frequentist)
+cat("\n=== 95% Credible Intervals (Bayesian Robust) ===\n")
+bayes_ci <- posterior_interval(model4_bayes_robust, prob = 0.95)
+print(head(bayes_ci, 15))  # Show first 15 for readability
+
+cat("\n=== 95% Confidence Intervals (First Bayesian) ===\n")
+freq_ci <- posterior_interval(model4_bayes, prob = 0.95)
+print(head(freq_ci, 15))
+
+
+
+# Model comparison metrics
+cat("\n=== Model Fit Metrics ===\n")
+cat("LOO (Leave-One-Out Cross-Validation):\n")
+loo_model4 <- loo(model4_bayes_robust)
+print(loo_model4)
+
+cat("\nWAIC (Watanabe-Akaike Information Criterion):\n")
+waic_model4 <- waic(model4_bayes_robust)
+print(waic_model4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
